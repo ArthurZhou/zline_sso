@@ -1,0 +1,13 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "issuer": "https://jc.d2lib.com/",
+  "key_rotation_hours": 24,
+  "clients": [
+    {
+      "client_id": "alist",
+      "client_secret": "kLS2V_Q_XZ-9A4WPL2lSo_xQFe8pmHBKs64MC1AzfBQ",
+      "redirect_uris": ["http://localhost:5244/auth/oidc/callback"]
+    }
+  ]
+}

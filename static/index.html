@@ -3,16 +3,14 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>统一身份认证</title>
+    <title>OIDC Login</title>
     <style>
         body {
-            font-family: -apple-system, system-ui, sans-serif;
+            font-family: sans-serif;
             display: flex;
             justify-content: center;
             align-items: center;
             height: 100vh;
-            margin: 0;
             background: #f4f7f9;
         }
 
@@ -21,14 +19,7 @@
             padding: 40px;
             border-radius: 12px;
             box-shadow: 0 8px 30px rgba(0, 0, 0, 0.05);
-            width: 100%;
-            max-width: 350px;
-        }
-
-        h2 {
-            margin-top: 0;
-            color: #333;
-            text-align: center;
+            width: 350px;
         }
 
         input {
@@ -38,7 +29,6 @@
             border: 1px solid #ddd;
             border-radius: 6px;
             box-sizing: border-box;
-            font-size: 16px;
         }
 
         button {
@@ -48,13 +38,7 @@
             color: white;
             border: none;
             border-radius: 6px;
-            font-size: 16px;
             cursor: pointer;
-            transition: background 0.2s;
-        }
-
-        button:hover {
-            background: #0056b3;
         }
 
         #msg {
@@ -77,34 +61,67 @@
         <div id="msg"></div>
     </div>
 
-    <script src="crypto.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js"></script>
     <script>
         document.getElementById('loginForm').onsubmit = async (e) => {
             e.preventDefault();
             const msg = document.getElementById('msg');
+            msg.innerText = "正在加密并登录...";
 
-            // Get redirect_uri from current browser URL
-            const urlParams = new URLSearchParams(window.location.search);
-            const targetUri = urlParams.get('redirect_uri');
+            try {
+                // 1. 从 URL 获取 OIDC 上下文参数
+                const urlParams = new URLSearchParams(window.location.search);
+                const clientId = urlParams.get('client_id'); // 新增：从 URL 获取 client_id
+                const redirectUri = urlParams.get('redirect_uri');
+                const state = urlParams.get('state');
 
-            const res = await fetch('/auth/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    username: document.getElementById('username').value,
-                    password: document.getElementById('password').value,
-                    redirect_uri: targetUri // Send it to Rust
-                })
-            });
+                // 基础校验
+                if (!clientId || !redirectUri) {
+                    throw new Error("缺少 OIDC 参数 (client_id 或 redirect_uri)");
+                }
 
-            const data = await res.json();
-            if (res.ok) {
-                // Dynamic Redirect: Go back to the application that requested auth
-                const finalUrl = new URL(data.redirect_uri);
-                finalUrl.searchParams.set('token', data.id_token);
-                window.location.href = finalUrl.toString();
-            } else {
-                msg.innerText = data.message || "登录失败";
+                // 2. 获取服务器公钥
+                const keyRes = await fetch('/auth/provider-key');
+                if (!keyRes.ok) throw new Error("无法获取服务器密钥");
+                const { pub_key } = await keyRes.json();
+
+                // 3. 加密凭据
+                const encryptor = new JSEncrypt();
+                encryptor.setPublicKey(pub_key);
+
+                const encUser = encryptor.encrypt(document.getElementById('username').value);
+                const encPass = encryptor.encrypt(document.getElementById('password').value);
+
+                // 4. 提交登录请求
+                const res = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: encUser,
+                        password: encPass,
+                        client_id: clientId,      // 必须包含此字段以匹配 Rust 的 LoginRequest
+                        redirect_uri: redirectUri,
+                        state: state
+                    })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    // 5. 构建安全的回调 URL
+                    const target = new URL(data.redirect_uri);
+                    target.searchParams.set('code', data.code);
+                    if (data.state) {
+                        target.searchParams.set('state', data.state);
+                    }
+                    // 跳转回 AList
+                    window.location.href = target.toString();
+                } else {
+                    const errData = await res.json().catch(() => ({}));
+                    msg.innerText = "登录失败: " + (errData.message || res.statusText);
+                }
+            } catch (err) {
+                console.error("Detailed Error:", err);
+                msg.innerText = "错误: " + err.message;
             }
         };
     </script>
