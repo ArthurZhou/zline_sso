@@ -51,7 +51,11 @@
             transition: background 0.3s ease, box-shadow 0.3s ease;
         }
 
-        h2 { margin-top: 0; text-align: center; font-size: 24px; }
+        h2 {
+            margin-top: 0;
+            text-align: center;
+            font-size: 24px;
+        }
 
         input {
             width: 100%;
@@ -66,7 +70,9 @@
             transition: border-color 0.3s ease;
         }
 
-        input:focus { border-color: var(--primary-btn); }
+        input:focus {
+            border-color: var(--primary-btn);
+        }
 
         button {
             width: 100%;
@@ -98,6 +104,21 @@
             font-size: 14px;
             min-height: 20px;
         }
+
+        .agreement-link {
+            display: block;
+            text-align: center;
+            margin-top: 15px;
+            font-size: 12px;
+            color: var(--text-muted, #666);
+            text-decoration: none;
+            transition: color 0.3s;
+        }
+
+        .agreement-link:hover {
+            color: var(--primary-btn);
+            text-decoration: underline;
+        }
     </style>
 </head>
 
@@ -109,130 +130,135 @@
             <input type="password" id="password" placeholder="密码" required>
             <button type="submit" id="submitBtn">登录</button>
         </form>
+        <div style="text-align: center; margin-top: 15px;">
+            <a href="/auth/agreement" style="color: var(--text-muted); font-size: 12px; text-decoration: none;">
+                登录即代表您同意《用户协议与隐私政策》
+            </a>
+        </div>
         <div id="msg"></div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
     <script>
-    const loginForm = document.getElementById('loginForm');
-    const submitBtn = document.getElementById('submitBtn');
-    const msg = document.getElementById('msg');
+        const loginForm = document.getElementById('loginForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const msg = document.getElementById('msg');
 
-    // 辅助函数：将 Hex 字符串转换为 CryptoJS 的 WordArray
-    const hexToWordArray = (hex) => CryptoJS.enc.Hex.parse(hex);
+        // 辅助函数：将 Hex 字符串转换为 CryptoJS 的 WordArray
+        const hexToWordArray = (hex) => CryptoJS.enc.Hex.parse(hex);
 
-    async function encryptPayload(username, password, sharedKeyHex) {
-        // 1. 构造原始字符串: "用户名|密码|时间戳"
-        const timestamp = Math.floor(Date.now() / 1000);
-        const rawStr = `${username}|${password}|${timestamp}`;
+        async function encryptPayload(username, password, sharedKeyHex) {
+            // 1. 构造原始字符串: "用户名|密码|时间戳"
+            const timestamp = Math.floor(Date.now() / 1000);
+            const rawStr = `${username}|${password}|${timestamp}`;
 
-        // 2. 准备密钥和随机向量 (IV / Nonce)
-        const key = hexToWordArray(sharedKeyHex);
-        const iv = CryptoJS.lib.WordArray.random(12); // 后端预期 12 字节 Nonce
+            // 2. 准备密钥和随机向量 (IV / Nonce)
+            const key = hexToWordArray(sharedKeyHex);
+            const iv = CryptoJS.lib.WordArray.random(12); // 后端预期 12 字节 Nonce
 
-        // 3. AES-GCM 加密
-        const encrypted = CryptoJS.AES.encrypt(rawStr, key, {
-            iv: iv,
-            mode: CryptoJS.mode.CTR, // 注意：CryptoJS 的 GCM 支持较复杂，
-                                     // 如果后端用的是标准 Aes256Gcm，建议配合以下封装：
-            padding: CryptoJS.pad.NoPadding
-        });
-        
-        // 对应后端 expect 的 [nonce(12) + ciphertext + tag]
-        // 由于 CryptoJS 默认逻辑差异，建议使用更符合 Web 标准的 WebCrypto API (见下)
-        return await webCryptoEncrypt(rawStr, sharedKeyHex);
-    }
-
-    // 使用浏览器原生 WebCrypto API (支持最标准的 AES-GCM)
-    async function webCryptoEncrypt(text, keyHex) {
-        const encoder = new TextEncoder();
-        const data = encoder.encode(text);
-        const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
-        
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']
-        );
-
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const ciphertext = await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv: iv },
-            cryptoKey,
-            data
-        );
-
-        // 拼接 nonce (12字节) + ciphertext
-        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-        combined.set(iv);
-        combined.set(new Uint8Array(ciphertext), iv.length);
-
-        // 转为 Base64 字符串
-        return btoa(String.fromCharCode(...combined));
-    }
-
-    loginForm.onsubmit = async (e) => {
-        e.preventDefault();
-        
-        const originalText = "登录";
-        submitBtn.disabled = true;
-        submitBtn.innerText = "正在初始化...";
-        msg.innerText = ""; 
-
-        try {
-            // 1. 获取 URL 参数
-            const urlParams = new URLSearchParams(window.location.search);
-            const clientId = urlParams.get('client_id'); 
-            const redirectUri = urlParams.get('redirect_uri');
-            const state = urlParams.get('state');
-
-            if (!clientId || !redirectUri) throw new Error("缺少 client_id 或 redirect_uri");
-
-            // 2. 核心修改：动态获取后端配置的共享密钥
-            const configRes = await fetch('/auth/crypto-config');
-            if (!configRes.ok) throw new Error("获取加密配置失败");
-            const { shared_key: sharedKeyHex } = await configRes.json();
-
-            submitBtn.innerText = "正在安全登录...";
-
-            const usernameVal = document.getElementById('username').value;
-            const passwordVal = document.getElementById('password').value;
-
-            // 3. 加密 (使用 WebCrypto 函数)
-            const encryptedData = await webCryptoEncrypt(
-                `${usernameVal}|${passwordVal}|${Math.floor(Date.now() / 1000)}`, 
-                sharedKeyHex
-            );
-
-            // 4. 提交
-            const res = await fetch('/auth/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    encrypted_payload: encryptedData,
-                    client_id: clientId,
-                    redirect_uri: redirectUri,
-                    state: state
-                })
+            // 3. AES-GCM 加密
+            const encrypted = CryptoJS.AES.encrypt(rawStr, key, {
+                iv: iv,
+                mode: CryptoJS.mode.CTR, // 注意：CryptoJS 的 GCM 支持较复杂，
+                // 如果后端用的是标准 Aes256Gcm，建议配合以下封装：
+                padding: CryptoJS.pad.NoPadding
             });
 
-            if (res.ok) {
-                const data = await res.json();
-                const target = new URL(data.redirect_uri);
-                target.searchParams.set('code', data.code);
-                if (data.state) target.searchParams.set('state', data.state);
-                window.location.href = target.toString();
-            } else {
-                const errData = await res.json().catch(() => ({}));
-                msg.innerText = "登录失败: " + (errData.message || "请求被拒绝");
+            // 对应后端 expect 的 [nonce(12) + ciphertext + tag]
+            // 由于 CryptoJS 默认逻辑差异，建议使用更符合 Web 标准的 WebCrypto API (见下)
+            return await webCryptoEncrypt(rawStr, sharedKeyHex);
+        }
+
+        // 使用浏览器原生 WebCrypto API (支持最标准的 AES-GCM)
+        async function webCryptoEncrypt(text, keyHex) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(text);
+            const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']
+            );
+
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const ciphertext = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv: iv },
+                cryptoKey,
+                data
+            );
+
+            // 拼接 nonce (12字节) + ciphertext
+            const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+            combined.set(iv);
+            combined.set(new Uint8Array(ciphertext), iv.length);
+
+            // 转为 Base64 字符串
+            return btoa(String.fromCharCode(...combined));
+        }
+
+        loginForm.onsubmit = async (e) => {
+            e.preventDefault();
+
+            const originalText = "登录";
+            submitBtn.disabled = true;
+            submitBtn.innerText = "正在初始化...";
+            msg.innerText = "";
+
+            try {
+                // 1. 获取 URL 参数
+                const urlParams = new URLSearchParams(window.location.search);
+                const clientId = urlParams.get('client_id');
+                const redirectUri = urlParams.get('redirect_uri');
+                const state = urlParams.get('state');
+
+                if (!clientId || !redirectUri) throw new Error("缺少 client_id 或 redirect_uri");
+
+                // 2. 核心修改：动态获取后端配置的共享密钥
+                const configRes = await fetch('/auth/crypto-config');
+                if (!configRes.ok) throw new Error("获取加密配置失败");
+                const { shared_key: sharedKeyHex } = await configRes.json();
+
+                submitBtn.innerText = "正在安全登录...";
+
+                const usernameVal = document.getElementById('username').value;
+                const passwordVal = document.getElementById('password').value;
+
+                // 3. 加密 (使用 WebCrypto 函数)
+                const encryptedData = await webCryptoEncrypt(
+                    `${usernameVal}|${passwordVal}|${Math.floor(Date.now() / 1000)}`,
+                    sharedKeyHex
+                );
+
+                // 4. 提交
+                const res = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        encrypted_payload: encryptedData,
+                        client_id: clientId,
+                        redirect_uri: redirectUri,
+                        state: state
+                    })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    const target = new URL(data.redirect_uri);
+                    target.searchParams.set('code', data.code);
+                    if (data.state) target.searchParams.set('state', data.state);
+                    window.location.href = target.toString();
+                } else {
+                    const errData = await res.json().catch(() => ({}));
+                    msg.innerText = "登录失败: " + (errData.message || "请求被拒绝");
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = originalText;
+                }
+            } catch (err) {
+                msg.innerText = "错误: " + err.message;
                 submitBtn.disabled = false;
                 submitBtn.innerText = originalText;
             }
-        } catch (err) {
-            msg.innerText = "错误: " + err.message;
-            submitBtn.disabled = false;
-            submitBtn.innerText = originalText;
-        }
-    };
-</script>
+        };
+    </script>
 </body>
 
 </html>

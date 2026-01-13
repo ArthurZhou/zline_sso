@@ -485,6 +485,20 @@ async fn login_page_handler() -> Response {
     }
 }
 
+async fn agreement_page_handler() -> Response {
+    match tokio::fs::read_to_string("static/agreement.html").await {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "协议模板文件不存在").into_response(),
+    }
+}
+
+async fn agreement_file_handler() -> Response {
+    match tokio::fs::read_to_string("static/agreement.md").await {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "协议模板文件不存在").into_response(),
+    }
+}
+
 // --- 5. 主程序入口 ---
 
 #[tokio::main]
@@ -525,6 +539,8 @@ async fn main() {
     let app = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/auth/", get(login_page_handler))
+        .route("/auth/agreement", get(agreement_page_handler))
+        .route("/auth/agreement.md", get(agreement_file_handler))
         .route("/auth/token", post(token_exchange_handler))
         .route("/auth/jwks", get(jwks_handler))
         .route("/auth/userinfo", get(userinfo_handler))

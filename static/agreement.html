@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>用户协议与隐私政策</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown.min.css">
+    <style>
+        :root { --bg: #f4f7f9; --card: #ffffff; }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #121212; --card: #1e1e1e; }
+        }
+        body { background-color: var(--bg); margin: 0; padding: 40px 20px; font-family: sans-serif; }
+        .markdown-body {
+            box-sizing: border-box;
+            min-width: 200px;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 45px;
+            background-color: var(--card);
+            border-radius: 12px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+        }
+        .back-link {
+            display: block; width: fit-content; margin: 20px auto;
+            color: #007bff; text-decoration: none; font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <article id="content" class="markdown-body">
+        正在加载协议内容...
+    </article>
+    <a href="javascript:history.back()" class="back-link">返回登录页面</a>
+
+    <script>
+        // 动态异步请求 Markdown 文件并渲染
+        fetch('agreement.md')
+            .then(response => {
+                if (!response.ok) throw new Error("无法加载协议文件");
+                return response.text();
+            })
+            .then(text => {
+                document.getElementById('content').innerHTML = marked.parse(text);
+            })
+            .catch(err => {
+                document.getElementById('content').innerHTML = `<p style="color:red">加载失败: ${err.message}</p>`;
+            });
+    </script>
+</body>
+</html>

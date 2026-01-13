@@ -7,7 +7,7 @@
         "max_clock_skew_secs": 300
     },
     "rate_limit": {
-        "per_second": 5
+        "per_second": 4
     },
     "clients": [
         {
@@ -17,13 +17,6 @@
                 "https://jc.d2lib.com/nas/api/auth/sso_callback",
                 "http://localhost:5244/auth/oidc/callback",
                 "https://172.16.20.111/nas/api/auth/sso_callback"
-            ]
-        },
-        {
-            "client_id": "test_client",
-            "client_secret": "test_client_secret",
-            "redirect_uris": [
-                "http://127.0.0.1:8080/callback"
             ]
         }
     ]
