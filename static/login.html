@@ -112,78 +112,128 @@
         <div id="msg"></div>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
     <script>
-        const loginForm = document.getElementById('loginForm');
-        const submitBtn = document.getElementById('submitBtn');
-        const msg = document.getElementById('msg');
+    const loginForm = document.getElementById('loginForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const msg = document.getElementById('msg');
 
-        loginForm.onsubmit = async (e) => {
-            e.preventDefault();
-            
-            const originalText = "登录";
-            submitBtn.disabled = true;
-            submitBtn.innerText = "正在登录...";
-            msg.innerText = ""; 
+    // 辅助函数：将 Hex 字符串转换为 CryptoJS 的 WordArray
+    const hexToWordArray = (hex) => CryptoJS.enc.Hex.parse(hex);
 
-            try {
-                const urlParams = new URLSearchParams(window.location.search);
-                const clientId = urlParams.get('client_id'); 
-                const redirectUri = urlParams.get('redirect_uri');
-                const state = urlParams.get('state');
+    async function encryptPayload(username, password, sharedKeyHex) {
+        // 1. 构造原始字符串: "用户名|密码|时间戳"
+        const timestamp = Math.floor(Date.now() / 1000);
+        const rawStr = `${username}|${password}|${timestamp}`;
 
-                if (!clientId || !redirectUri) {
-                    throw new Error("缺少 OIDC 参数 (client_id 或 redirect_uri)");
-                }
+        // 2. 准备密钥和随机向量 (IV / Nonce)
+        const key = hexToWordArray(sharedKeyHex);
+        const iv = CryptoJS.lib.WordArray.random(12); // 后端预期 12 字节 Nonce
 
-                // 获取服务器公钥
-                const keyRes = await fetch('/auth/provider-key');
-                if (!keyRes.ok) throw new Error("无法获取加密密钥");
-                const { pub_key } = await keyRes.json();
+        // 3. AES-GCM 加密
+        const encrypted = CryptoJS.AES.encrypt(rawStr, key, {
+            iv: iv,
+            mode: CryptoJS.mode.CTR, // 注意：CryptoJS 的 GCM 支持较复杂，
+                                     // 如果后端用的是标准 Aes256Gcm，建议配合以下封装：
+            padding: CryptoJS.pad.NoPadding
+        });
+        
+        // 对应后端 expect 的 [nonce(12) + ciphertext + tag]
+        // 由于 CryptoJS 默认逻辑差异，建议使用更符合 Web 标准的 WebCrypto API (见下)
+        return await webCryptoEncrypt(rawStr, sharedKeyHex);
+    }
 
-                // 加密凭据
-                const encryptor = new JSEncrypt();
-                encryptor.setPublicKey(pub_key);
-                const encUser = encryptor.encrypt(document.getElementById('username').value);
-                const encPass = encryptor.encrypt(document.getElementById('password').value);
+    // 使用浏览器原生 WebCrypto API (支持最标准的 AES-GCM)
+    async function webCryptoEncrypt(text, keyHex) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(text);
+        const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+        
+        const cryptoKey = await crypto.subtle.importKey(
+            'raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']
+        );
 
-                // 提交请求
-                const res = await fetch('/auth/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        username: encUser,
-                        password: encPass,
-                        client_id: clientId,
-                        redirect_uri: redirectUri,
-                        state: state
-                    })
-                });
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const ciphertext = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv: iv },
+            cryptoKey,
+            data
+        );
 
-                if (res.ok) {
-                    // 登录成功，显示正在跳转
-                    submitBtn.innerText = "正在跳转...";
-                    const data = await res.json();
-                    
-                    const target = new URL(data.redirect_uri);
-                    target.searchParams.set('code', data.code);
-                    if (data.state) target.searchParams.set('state', data.state);
-                    
-                    window.location.href = target.toString();
-                } else {
-                    const errData = await res.json().catch(() => ({}));
-                    msg.innerText = "登录失败: " + (errData.message || res.statusText);
-                    submitBtn.disabled = false;
-                    submitBtn.innerText = originalText;
-                }
-            } catch (err) {
-                console.error("Error:", err);
-                msg.innerText = "错误: " + err.message;
+        // 拼接 nonce (12字节) + ciphertext
+        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(ciphertext), iv.length);
+
+        // 转为 Base64 字符串
+        return btoa(String.fromCharCode(...combined));
+    }
+
+    loginForm.onsubmit = async (e) => {
+        e.preventDefault();
+        
+        const originalText = "登录";
+        submitBtn.disabled = true;
+        submitBtn.innerText = "正在登录...";
+        msg.innerText = ""; 
+
+        try {
+            const urlParams = new URLSearchParams(window.location.search);
+            const clientId = urlParams.get('client_id'); 
+            const redirectUri = urlParams.get('redirect_uri');
+            const state = urlParams.get('state');
+
+            if (!clientId || !redirectUri) {
+                throw new Error("缺少必要参数 (client_id 或 redirect_uri)");
+            }
+
+            // --- 核心修改：不再请求公钥，而是直接使用配置的共享密钥 ---
+            // 注意：在生产环境下，这个 Key 通常由后端直接在渲染页面时注入，或者通过环境变量管理
+            // 这里假设你的后端有一个配置接口，或者你直接硬编码（不推荐）
+            const sharedKeyHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"; // 应从 config.json 获取
+
+            const usernameVal = document.getElementById('username').value;
+            const passwordVal = document.getElementById('password').value;
+
+            // 加密
+            const encryptedData = await webCryptoEncrypt(
+                `${usernameVal}|${passwordVal}|${Math.floor(Date.now() / 1000)}`, 
+                sharedKeyHex
+            );
+
+            // 提交请求
+            const res = await fetch('/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    encrypted_payload: encryptedData, // 对应后端的 LoginRequest 结构
+                    client_id: clientId,
+                    redirect_uri: redirectUri,
+                    state: state
+                })
+            });
+
+            if (res.ok) {
+                submitBtn.innerText = "正在跳转...";
+                const data = await res.json();
+                const target = new URL(data.redirect_uri);
+                target.searchParams.set('code', data.code);
+                if (data.state) target.searchParams.set('state', data.state);
+                window.location.href = target.toString();
+            } else {
+                const errData = await res.json().catch(() => ({}));
+                msg.innerText = "登录失败: " + (errData.message || "凭据解析错误或频率限制");
                 submitBtn.disabled = false;
                 submitBtn.innerText = originalText;
             }
-        };
-    </script>
+        } catch (err) {
+            console.error("Error:", err);
+            msg.innerText = "错误: " + err.message;
+            submitBtn.disabled = false;
+            submitBtn.innerText = originalText;
+        }
+    };
+</script>
 </body>
 
 </html>

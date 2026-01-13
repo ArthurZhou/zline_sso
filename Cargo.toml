@@ -17,3 +17,6 @@ chrono = "0.4"
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 rand = "0.8"
 serde_urlencoded = "0.7"
+aes-gcm = "0.10.3"
+hex = "0.4.3"
+tower = { version = "0.4", features = ["limit", "filter", "util", "buffer"] }
