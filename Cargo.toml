@@ -4,20 +4,28 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-uuid = { version = "1.8", features = ["v4"] } 
-rsa = { version = "0.9", features = ["pem"] }
-axum = "0.7"
-tokio = { version = "1.0", features = ["full"] }
+# Web 框架 (保持 Axum 默认，即 HTTP)
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tower_governor = "0.4"
+
+# 序列化与数据
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", default-features = false, features = ["json", "cookies", "rustls-tls"] }
-jsonwebtoken = "9.2"
-base64 = "0.21"
+uuid = { version = "1.0", features = ["v4"] }
 chrono = "0.4"
-tower-http = { version = "0.5", features = ["fs", "cors"] }
+
+# 数据库
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# 加密与安全
+rsa = { version = "0.9", features = ["pem"] }
+aes-gcm = "0.10"
+jsonwebtoken = "9.0"
+base64 = "0.22"
+hex = "0.4"
 rand = "0.8"
-serde_urlencoded = "0.7"
-aes-gcm = "0.10.3"
-hex = "0.4.3"
-tower = { version = "0.4", features = ["limit", "filter", "util", "buffer"] }
-rusqlite = { version = "0.31.0", features = ["bundled"] }
+
+# HTTP客户端
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
