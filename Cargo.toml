@@ -10,7 +10,7 @@ axum = "0.7"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", features = ["json", "cookies"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "cookies", "rustls-tls"] }
 jsonwebtoken = "9.2"
 base64 = "0.21"
 chrono = "0.4"

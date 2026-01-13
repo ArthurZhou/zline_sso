@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>校园工作台SSO</title>
+    <style>
+        :root {
+            --bg-color: #f4f7f9;
+            --card-bg: #ffffff;
+            --text-main: #333333;
+            --input-bg: #ffffff;
+            --input-border: #dddddd;
+            --primary-btn: #007bff;
+            --primary-btn-hover: #0056b3;
+            --primary-btn-disabled: #a0cfff;
+            --error-text: #d9534f;
+            --shadow: rgba(0, 0, 0, 0.05);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #121212;
+                --card-bg: #1e1e1e;
+                --text-main: #e0e0e0;
+                --input-bg: #2d2d2d;
+                --input-border: #444444;
+                --primary-btn-disabled: #3d4a5d;
+                --shadow: rgba(0, 0, 0, 0.3);
+            }
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: var(--bg-color);
+            color: var(--text-main);
+            transition: background 0.3s ease;
+        }
+
+        .card {
+            background: var(--card-bg);
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 30px var(--shadow);
+            width: 350px;
+            transition: background 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        h2 { margin-top: 0; text-align: center; font-size: 24px; }
+
+        input {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: 1px solid var(--input-border);
+            border-radius: 6px;
+            box-sizing: border-box;
+            background: var(--input-bg);
+            color: var(--text-main);
+            outline: none;
+            transition: border-color 0.3s ease;
+        }
+
+        input:focus { border-color: var(--primary-btn); }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background: var(--primary-btn);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            margin-top: 10px;
+            transition: all 0.3s ease;
+        }
+
+        button:hover:not(:disabled) {
+            background: var(--primary-btn-hover);
+        }
+
+        button:disabled {
+            background: var(--primary-btn-disabled);
+            cursor: not-allowed;
+        }
+
+        #msg {
+            color: var(--error-text);
+            text-align: center;
+            margin-top: 15px;
+            font-size: 14px;
+            min-height: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <h2>校园工作台 SSO 登录</h2>
+        <form id="loginForm">
+            <input type="text" id="username" placeholder="用户名" required>
+            <input type="password" id="password" placeholder="密码" required>
+            <button type="submit" id="submitBtn">登录</button>
+        </form>
+        <div id="msg"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js"></script>
+    <script>
+        const loginForm = document.getElementById('loginForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const msg = document.getElementById('msg');
+
+        loginForm.onsubmit = async (e) => {
+            e.preventDefault();
+            
+            const originalText = "登录";
+            submitBtn.disabled = true;
+            submitBtn.innerText = "正在登录...";
+            msg.innerText = ""; 
+
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const clientId = urlParams.get('client_id'); 
+                const redirectUri = urlParams.get('redirect_uri');
+                const state = urlParams.get('state');
+
+                if (!clientId || !redirectUri) {
+                    throw new Error("缺少 OIDC 参数 (client_id 或 redirect_uri)");
+                }
+
+                // 获取服务器公钥
+                const keyRes = await fetch('/auth/provider-key');
+                if (!keyRes.ok) throw new Error("无法获取加密密钥");
+                const { pub_key } = await keyRes.json();
+
+                // 加密凭据
+                const encryptor = new JSEncrypt();
+                encryptor.setPublicKey(pub_key);
+                const encUser = encryptor.encrypt(document.getElementById('username').value);
+                const encPass = encryptor.encrypt(document.getElementById('password').value);
+
+                // 提交请求
+                const res = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: encUser,
+                        password: encPass,
+                        client_id: clientId,
+                        redirect_uri: redirectUri,
+                        state: state
+                    })
+                });
+
+                if (res.ok) {
+                    // 登录成功，显示正在跳转
+                    submitBtn.innerText = "正在跳转...";
+                    const data = await res.json();
+                    
+                    const target = new URL(data.redirect_uri);
+                    target.searchParams.set('code', data.code);
+                    if (data.state) target.searchParams.set('state', data.state);
+                    
+                    window.location.href = target.toString();
+                } else {
+                    const errData = await res.json().catch(() => ({}));
+                    msg.innerText = "登录失败: " + (errData.message || res.statusText);
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = originalText;
+                }
+            } catch (err) {
+                console.error("Error:", err);
+                msg.innerText = "错误: " + err.message;
+                submitBtn.disabled = false;
+                submitBtn.innerText = originalText;
+            }
+        };
+    </script>
+</body>
+
+</html>
