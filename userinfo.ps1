@@ -1,0 +1,4 @@
+$token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6IjIwM2NhMDI2LWJhN2EtNGYyNC1hZjAwLTQ1Yzg2ZGRiMGEzNiJ9.eyJpc3MiOiJodHRwOi8vMTI3LjAuMC4xOjgwOTciLCJzdWIiOiIzMjAyNDExNDEiLCJhdWQiOiJ0ZXN0X2NsaWVudCIsImV4cCI6MTc2ODI5MzExNSwiaWF0IjoxNzY4Mjg5NTE1fQ.UPomDK_hdxVNJ1iZJ1Xm7RfyAZpbHgjV5sL_mkxH2rbc3ptlot7UNVBYZ-GQ_78nSrR_FWyT9P-phGmcIZKt_qOQL3dDNAmFuHOSSjTXfVPpN9MWcUa22W1TnVgpUC0MHxBYSwcR3fx8m9dfdePR1INxuEa8ukJvik4_EsGpJF2Ztaad2bhrIwQmA9ZV5EgtXpwey-n7VsSadpMZM4X1fgL6nLQUou6Dskeop4Su-F-Z4diTTSDq1F2P6SDhopv9uvikuj7jZ825ObgoUxEiZ2XmhoxnffIm0Dp3Os30D4ZrpZD606pdyOuVI2rU0MWBtr 0anCCxDFZ5qF0Dx-G6jQ"
+$headers = @{ Authorization = "Bearer $token" }
+$userinfo = Invoke-RestMethod -Uri "http://127.0.0.1:8097/auth/userinfo" -Headers $headers
+$userinfo | Format-Table
