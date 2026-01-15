@@ -2,49 +2,137 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>用户协议与隐私政策</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown.min.css">
     <style>
-        :root { --bg: #f4f7f9; --card: #ffffff; }
-        @media (prefers-color-scheme: dark) {
-            :root { --bg: #121212; --card: #1e1e1e; }
+        @font-face {
+            font-family: 'sarasa';
+            src: url('/auth/font.woff');
         }
-        body { background-color: var(--bg); margin: 0; padding: 40px 20px; font-family: sans-serif; }
-        .markdown-body {
-            box-sizing: border-box;
-            min-width: 200px;
+
+        :root {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --border: #1a1a1a;
+            --card-bg: #ffffff;
+            --muted: #666666;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #121212;
+                --text: #eeeeee;
+                --border: #444444;
+                --card-bg: #1e1e1e;
+                --muted: #888888;
+            }
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 40px 20px;
+            font-family: ui-monospace, 'sarasa', monospace;
+            line-height: 1.6;
+        }
+
+        .doc-wrapper {
             max-width: 800px;
             margin: 0 auto;
-            padding: 45px;
-            background-color: var(--card);
-            border-radius: 12px;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+            border: 2px solid var(--border);
+            background: var(--card-bg);
+            padding: 40px;
         }
+
+        .header {
+            border-bottom: 4px solid var(--border);
+            margin-bottom: 30px;
+            padding-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 22px;
+            text-transform: uppercase;
+            font-weight: 900;
+        }
+
+        .doc-meta {
+            font-size: 12px;
+            color: var(--muted);
+            text-align: right;
+        }
+
+        /* Markdown 样式覆盖 */
+        #content h1, #content h2, #content h3 {
+            text-transform: uppercase;
+            border-left: 4px solid var(--border);
+            padding-left: 15px;
+            margin-top: 30px;
+        }
+
+        #content p { margin-bottom: 15px; font-size: 14px; }
+        
+        #content code {
+            background: var(--border);
+            color: var(--bg);
+            padding: 2px 5px;
+        }
+
+        .nav-footer {
+            max-width: 800px;
+            margin: 30px auto;
+            text-align: center;
+        }
+
         .back-link {
-            display: block; width: fit-content; margin: 20px auto;
-            color: #007bff; text-decoration: none; font-size: 14px;
+            color: var(--text);
+            text-decoration: underline;
+            font-weight: 900;
+            text-transform: uppercase;
+            font-size: 13px;
+        }
+
+        @media (max-width: 600px) {
+            .doc-wrapper { padding: 20px; }
+            .header { flex-direction: column; align-items: flex-start; gap: 10px; }
         }
     </style>
 </head>
 <body>
-    <article id="content" class="markdown-body">
-        正在加载协议内容...
-    </article>
-    <a href="javascript:history.back()" class="back-link">返回登录页面</a>
+    <div class="doc-wrapper">
+        <header class="header">
+            <h1>用户协议与隐私政策</h1>
+            <div class="doc-meta">
+                AGREEMENT.MD
+            </div>
+        </header>
+        
+        <article id="content">
+            >> 正在加载远程文档
+        </article>
+    </div>
+
+    <div class="nav-footer">
+        <a href="javascript:history.back()" class="back-link">返回</a>
+    </div>
 
     <script>
-        // 动态异步请求 Markdown 文件并渲染
         fetch('agreement.md')
             .then(response => {
-                if (!response.ok) throw new Error("无法加载协议文件");
+                if (!response.ok) throw new Error("File not found");
                 return response.text();
             })
             .then(text => {
                 document.getElementById('content').innerHTML = marked.parse(text);
             })
             .catch(err => {
-                document.getElementById('content').innerHTML = `<p style="color:red">加载失败: ${err.message}</p>`;
+                document.getElementById('content').innerHTML = `<p style="color:red">[ERROR] Stream interrupted: ${err.message}</p>`;
             });
     </script>
 </body>

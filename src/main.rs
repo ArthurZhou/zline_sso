@@ -5,7 +5,7 @@ use aes_gcm::{
 use axum::{
     Router,
     extract::{Form, Query, State},
-    http::{Method, StatusCode},
+    http::{Method, StatusCode, header},
     response::{Html, IntoResponse, Json, Redirect, Response},
     routing::{get, post},
 };
@@ -30,6 +30,7 @@ use std::{
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeFile;
 use uuid::Uuid;
 
 // --- 数据结构 ---
@@ -82,10 +83,11 @@ struct AppState {
 
 #[derive(Deserialize, Debug, Clone)]
 struct LoginRequest {
-    encrypted_payload: Option<String>, // 只有在提交表单时存在
+    encrypted_payload: Option<String>,
     client_id: String,
     redirect_uri: String,
     state: Option<String>,
+    remember: Option<bool>, // 新增字段，接收前端 checkbox 状态
 }
 
 #[derive(Deserialize)]
@@ -263,7 +265,7 @@ async fn logout_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let query_str = serde_urlencoded::to_string(&params).unwrap_or_default();
-    
+
     // 构建一个立即过期的 Cookie 来强制覆盖并清除
     let remove_cookie = Cookie::build(("sso_session", ""))
         .path("/")
@@ -283,11 +285,24 @@ async fn continue_handler(
     jar: CookieJar,
     Query(payload): Query<LoginRequest>,
 ) -> Response {
+    // 1. 检查 Cookie 是否存在
     let username = match jar.get("sso_session") {
         Some(c) => c.value().to_string(),
         None => return (StatusCode::UNAUTHORIZED, "会话已过期").into_response(),
     };
 
+    // 2. 【关键修复】必须校验 Client ID 是否在 config.json 中
+    let client = state.config.clients.iter().find(|c| c.client_id == payload.client_id);
+    if client.is_none() {
+        return (StatusCode::BAD_REQUEST, "无效的 Client ID").into_response();
+    }
+
+    // 3. 【关键修复】必须校验重定向 URI 是否合法
+    if !client.unwrap().redirect_uris.iter().any(|uri| payload.redirect_uri.starts_with(uri)) {
+        return (StatusCode::FORBIDDEN, "无效的重定向 URI").into_response();
+    }
+
+    // 4. 检查数据库中用户状态
     let conn = Connection::open(&state.db_path).unwrap();
     let user_row: Option<(i32, Option<String>)> = conn
         .query_row(
@@ -298,17 +313,13 @@ async fn continue_handler(
         .optional()
         .unwrap();
 
-    // State 系统检查：当为非 0（且非 Bypass 状态 3）时，拒绝并返回描述
     if let Some((st, desc)) = user_row {
         if st == 1 || st == 2 {
-            return (
-                StatusCode::FORBIDDEN,
-                desc.unwrap_or_else(|| "账户已锁定".into()),
-            ).into_response();
+            return (StatusCode::FORBIDDEN, desc.unwrap_or_else(|| "账户已锁定".into())).into_response();
         }
     }
 
-    // 自动重定向逻辑：返回与正常登录相同的 JSON，由前端执行最终跳转以保持一致性
+    // 5. 调用你已有的函数发放 code 并返回 JSON
     issue_code_response(
         &state,
         username,
@@ -353,6 +364,8 @@ async fn login_handler(
         Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
     };
 
+    let remember = payload.remember.unwrap_or(false); // 获取记住我选项
+
     let conn = Connection::open(&state.db_path).unwrap();
 
     let local_user: Option<(i32, Option<String>, Option<String>, Option<String>)> = conn
@@ -368,13 +381,14 @@ async fn login_handler(
             return (
                 StatusCode::FORBIDDEN,
                 desc.unwrap_or_else(|| "账号被限制".into()),
-            ).into_response();
+            )
+                .into_response();
         }
-        
+
         // Bypass 逻辑 (State 3)
         if st == 3 {
             return (
-                jar.add(create_sso_cookie(user.clone())),
+                jar.add(create_sso_cookie(user.clone(), remember)),
                 issue_code_response(
                     &state,
                     user,
@@ -382,18 +396,25 @@ async fn login_handler(
                     payload.redirect_uri,
                     payload.state,
                 ),
-            ).into_response();
+            )
+                .into_response();
         }
-        
+
         // 自动同步检查：检查 xuid 和 xuxm 是否有空字段
-        if xuid.is_none() || xuxm.is_none() || xuid.as_ref().unwrap().is_empty() || xuxm.as_ref().unwrap().is_empty() {
-            return perform_jincai_login_and_sync(state, jar, user, pass, payload, conn).await;
+        if xuid.is_none()
+            || xuxm.is_none()
+            || xuid.as_ref().unwrap().is_empty()
+            || xuxm.as_ref().unwrap().is_empty()
+        {
+            return perform_jincai_login_and_sync(state, jar, user, pass, remember, payload, conn)
+                .await;
         }
     } else {
-        return perform_jincai_login_and_sync(state, jar, user, pass, payload, conn).await;
+        return perform_jincai_login_and_sync(state, jar, user, pass, remember, payload, conn)
+            .await;
     }
 
-    perform_jincai_login_and_sync(state, jar, user, pass, payload, conn).await
+    perform_jincai_login_and_sync(state, jar, user, pass, remember, payload, conn).await
 }
 
 async fn perform_jincai_login_and_sync(
@@ -401,6 +422,7 @@ async fn perform_jincai_login_and_sync(
     jar: CookieJar,
     user: String,
     pass: String,
+    remember: bool,
     payload: LoginRequest,
     conn: Connection,
 ) -> Response {
@@ -443,7 +465,7 @@ async fn perform_jincai_login_and_sync(
             );
 
             return (
-                jar.add(create_sso_cookie(user.clone())),
+                jar.add(create_sso_cookie(user.clone(), remember)),
                 issue_code_response(
                     &state,
                     user,
@@ -451,18 +473,29 @@ async fn perform_jincai_login_and_sync(
                     payload.redirect_uri,
                     payload.state,
                 ),
-            ).into_response();
+            )
+                .into_response();
         }
     }
     (StatusCode::UNAUTHORIZED, "第三方验证失败").into_response()
 }
 
-fn create_sso_cookie(username: String) -> Cookie<'static> {
-    Cookie::build(("sso_session", username))
+// 修改原有的函数，增加 remember 参数
+fn create_sso_cookie(username: String, remember: bool) -> Cookie<'static> {
+    let mut builder = Cookie::build(("sso_session", username))
         .path("/")
         .http_only(true)
-        .max_age(time::Duration::days(7))
-        .build()
+        .same_site(axum_extra::extract::cookie::SameSite::Lax); // 推荐增加 SameSite 属性
+
+    if remember {
+        // 如果勾选记住我，设置 7 天有效期
+        builder = builder.max_age(time::Duration::days(7));
+    } else {
+        builder = builder.max_age(time::Duration::seconds(1));
+    }
+    // 注意：如果不设置 max_age，默认就是 Session Cookie，浏览器关闭后自动删除
+
+    builder.build()
 }
 
 fn issue_code_response(
@@ -603,6 +636,19 @@ async fn crypto_config_handler(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+async fn font_handler() -> impl IntoResponse {
+    match tokio::fs::read("static/font.woff").await {
+        Ok(data) => (
+            [
+                (header::CONTENT_TYPE, "font/woff"),
+                (header::CACHE_CONTROL, "public, max-age=2592000, immutable"),
+            ],
+            data,
+        ).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let config_str = fs::read_to_string("config.json").expect("config.json 缺失");
@@ -637,6 +683,9 @@ async fn main() {
 
     let app = Router::new()
         .route("/auth/crypto-config", get(crypto_config_handler))
+        .route_service("/auth/agreement", ServeFile::new("static/agreement.html"))
+        .route_service("/auth/agreement.md", ServeFile::new("static/AGREEMENT.md"))
+        .route("/auth/font.woff", get(font_handler))
         .route("/auth/login", post(login_handler))
         .route("/auth/", get(login_page_handler))
         .route("/auth/continue", get(continue_handler))

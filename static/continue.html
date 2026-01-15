@@ -1,99 +1,98 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>继续登录</title>
     <style>
+        @font-face {
+            font-family: 'sarasa';
+            src: url('/auth/font.woff');
+        }
+
         :root {
-            --bg-color: #f5f7fa;
-            --card-bg: #ffffff;
-            --text-main: #2d3436;
-            --text-sub: #636e72;
-            --primary-color: #007bff;
-            --primary-hover: #0056b3;
-            --secondary-color: #e9ecef;
-            --secondary-text: #495057;
-            --secondary-hover: #dee2e6;
-            --accent-bg: #f8f9fa;
-            --shadow: 0 10px 25px rgba(0, 0, 0, 0.05);
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --border: #1a1a1a;
+            --accent-bg: #f2f2f2;
+            --btn-primary: #1a1a1a;
+            --btn-primary-text: #ffffff;
+            --btn-secondary: #ffffff;
+            --btn-secondary-text: #1a1a1a;
+            --muted: #666666;
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
-                --bg-color: #121212;
-                --card-bg: #1e1e1e;
-                --text-main: #e0e0e0;
-                --text-sub: #b0b0b0;
-                --primary-color: #375a7f;
-                --primary-hover: #4b7eb0;
-                --secondary-color: #2d2d2d;
-                --secondary-text: #e0e0e0;
-                --secondary-hover: #3d3d3d;
-                --accent-bg: #2d2d2d;
-                --shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+                --bg: #121212;
+                --text: #eeeeee;
+                --border: #444444;
+                --accent-bg: #1e1e1e;
+                --btn-primary: #eeeeee;
+                --btn-primary-text: #121212;
+                --btn-secondary: #121212;
+                --btn-secondary-text: #eeeeee;
+                --muted: #888888;
             }
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
         }
 
         body {
             margin: 0;
-            padding: 0;
+            font-family: ui-monospace, 'sarasa', monospace;
+            background: var(--bg);
+            color: var(--text);
             display: flex;
+            align-items: center;
             justify-content: center;
-            align-items: center;
             min-height: 100vh;
-            background-color: var(--bg-color);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            color: var(--text-main);
-            transition: background-color 0.3s ease;
         }
 
-        .card {
+        .container {
             width: 100%;
-            max-width: 400px;
-            padding: 40px;
-            background: var(--card-bg);
-            border-radius: 12px;
-            box-shadow: var(--shadow);
-            text-align: center;
-            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+            max-width: 360px;
+            padding: 20px;
         }
 
-        h2 {
-            margin: 0 0 12px 0;
+        .header {
+            border-bottom: 4px solid var(--border);
+            margin-bottom: 30px;
+            padding-bottom: 10px;
+        }
+
+        .header h1 {
+            margin: 0;
             font-size: 24px;
-            font-weight: 600;
-        }
-
-        .user-info {
-            background-color: var(--accent-bg);
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 24px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .user-label {
-            font-size: 12px;
-            color: var(--text-sub);
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            font-weight: 900;
+        }
+
+        .user-box {
+            border: 2px solid var(--border);
+            background: var(--accent-bg);
+            padding: 20px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .label {
+            display: block;
+            font-size: 11px;
+            font-weight: bold;
+            color: var(--muted);
+            text-transform: uppercase;
+            margin-bottom: 8px;
         }
 
         .username {
-            font-size: 18px;
-            font-weight: 700;
-            color: var(--primary-color);
-        }
-
-        p {
-            margin: 0 0 32px 0;
-            color: var(--text-sub);
-            font-size: 15px;
-            line-height: 1.5;
+            font-size: 20px;
+            font-weight: 900;
+            word-break: break-all;
         }
 
         .btn-group {
@@ -103,61 +102,58 @@
         }
 
         .btn {
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 500;
-            text-decoration: none;
+            width: 100%;
+            padding: 15px;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 900;
+            text-transform: uppercase;
             cursor: pointer;
-            transition: all 0.2s ease;
-            border: none;
-            outline: none;
+            border: 2px solid var(--border);
+            transition: opacity 0.2s;
         }
 
         .btn-primary {
-            background-color: var(--primary-color);
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background-color: var(--primary-hover);
-            transform: translateY(-1px);
+            background: var(--btn-primary);
+            color: var(--btn-primary-text);
         }
 
         .btn-secondary {
-            background-color: var(--secondary-color);
-            color: var(--secondary-text);
-        }
-
-        .btn-secondary:hover {
-            background-color: var(--secondary-hover);
+            background: var(--btn-secondary);
+            color: var(--btn-secondary-text);
         }
 
         .btn:active {
-            transform: scale(0.98);
+            opacity: 0.8;
         }
 
-        @media (max-width: 480px) {
-            .card {
-                padding: 30px 20px;
-                margin: 20px;
-                box-shadow: none;
-                background: transparent;
-            }
+        .info-text {
+            margin-top: 20px;
+            font-size: 12px;
+            color: var(--muted);
+            text-align: center;
         }
     </style>
 </head>
+
 <body>
-    <div class="card">
-        <h2>欢迎回来</h2>
-        <div class="user-info">
-            <span class="user-label">当前登录账号</span>
+    <div class="container">
+        <div class="header">
+            <h1>欢迎回来</h1>
+        </div>
+
+        <div class="user-box">
+            <span class="label">已登录账户</span>
             <span class="username">{{username}}</span>
         </div>
-        <p>是否直接进入系统？</p>
+
         <div class="btn-group">
-            <button class="btn btn-primary" onclick="handleContinue()">使用当前账号继续</button>
-            <button class="btn btn-secondary" onclick="handleLogout()">切换账号</button>
+            <button class="btn btn-primary" onclick="handleContinue()">使用此账户继续</button>
+            <button class="btn btn-secondary" onclick="handleLogout()">退出并切换</button>
+        </div>
+
+        <div class="info-text">
+            登录跳转页
         </div>
     </div>
 
@@ -169,15 +165,26 @@
                 const resp = await fetch(`/auth/continue${queryParams}`);
                 if (resp.ok) {
                     const data = await resp.json();
-                    let target = `${data.redirect_uri}?code=${data.code}`;
-                    if (data.state) target += `&state=${encodeURIComponent(data.state)}`;
+                    
+                    // --- 关键修复：智能处理 URL 拼接 ---
+                    const redirectBase = data.redirect_uri;
+                    // 判断原 URI 是否已包含问号
+                    const separator = redirectBase.includes('?') ? '&' : '?';
+                    
+                    let target = `${redirectBase}${separator}code=${data.code}`;
+                    if (data.state) {
+                        target += `&state=${encodeURIComponent(data.state)}`;
+                    }
+                    
                     window.location.href = target;
+                    // ------------------------------
+                    
                 } else {
                     const errorText = await resp.text();
-                    alert("登录失败: " + errorText);
+                    alert("Auth Error: " + errorText);
                 }
             } catch (e) {
-                alert("网络请求失败，请检查网络连接");
+                alert("Network failure.");
             }
         }
 
@@ -186,4 +193,5 @@
         }
     </script>
 </body>
+
 </html>

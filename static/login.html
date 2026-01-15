@@ -3,119 +3,199 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>校园工作台SSO</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>校园工作台 SSO</title>
     <style>
-        /* 保持你原有的 CSS 样式不变 */
+        @font-face {
+            font-family: 'sarasa';
+            src: url('/auth/font.woff');
+        }
+
         :root {
-            --bg-color: #f4f7f9;
-            --card-bg: #ffffff;
-            --text-main: #333333;
-            --input-bg: #ffffff;
-            --input-border: #dddddd;
-            --primary-btn: #007bff;
-            --primary-btn-hover: #0056b3;
-            --primary-btn-disabled: #a0cfff;
-            --error-text: #d9534f;
-            --shadow: rgba(0, 0, 0, 0.05);
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --border: #1a1a1a;
+            --input-bg: #f2f2f2;
+            --accent: #000000;
+            --accent-text: #ffffff;
+            --error: #e63946;
+            --muted: #666666;
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
-                --bg-color: #121212;
-                --card-bg: #1e1e1e;
-                --text-main: #e0e0e0;
-                --input-bg: #2d2d2d;
-                --input-border: #444444;
-                --primary-btn-disabled: #3d4a5d;
-                --shadow: rgba(0, 0, 0, 0.3);
+                --bg: #121212;
+                --text: #eeeeee;
+                --border: #444444;
+                --input-bg: #1e1e1e;
+                --accent: #eeeeee;
+                --accent-text: #121212;
+                --muted: #888888;
             }
         }
 
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
             margin: 0;
-            background: var(--bg-color);
-            color: var(--text-main);
+            font-family: ui-monospace, 'sarasa', monospace;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
         }
 
-        .card {
-            background: var(--card-bg);
-            padding: 40px;
-            border-radius: 12px;
-            box-shadow: 0 8px 30px var(--shadow);
-            width: 350px;
+        .container {
+            width: 100%;
+            max-width: 360px;
+            padding: 20px;
         }
 
-        h2 {
-            margin-top: 0;
-            text-align: center;
-            font-size: 22px;
-            margin-bottom: 25px;
+        .header {
+            border-bottom: 4px solid var(--border);
+            margin-bottom: 30px;
+            padding-bottom: 10px;
         }
 
-        input {
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            text-transform: uppercase;
+            font-weight: 900;
+        }
+
+        .form-item {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+        }
+
+        input[type="text"],
+        input[type="password"] {
             width: 100%;
             padding: 12px;
-            margin: 10px 0;
-            border: 1px solid var(--input-border);
-            border-radius: 6px;
-            box-sizing: border-box;
             background: var(--input-bg);
-            color: var(--text-main);
+            border: 2px solid var(--border);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 16px;
             outline: none;
+            transition: background 0.2s;
+        }
+
+        input:focus {
+            background: var(--bg);
+        }
+
+        .options {
+            display: flex;
+            align-items: center;
+            margin: 20px 0;
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+        .options input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            margin-right: 10px;
+            cursor: pointer;
+            accent-color: var(--accent);
         }
 
         button {
             width: 100%;
-            padding: 12px;
-            background: var(--primary-btn);
-            color: white;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
+            padding: 15px;
+            background: var(--accent);
+            color: var(--accent-text);
+            border: 2px solid var(--border);
+            font-family: inherit;
             font-size: 16px;
-            font-weight: 500;
-            margin-top: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        button:active {
+            opacity: 0.8;
         }
 
         button:disabled {
-            background: var(--primary-btn-disabled);
+            background: var(--input-bg);
+            color: var(--muted);
             cursor: not-allowed;
         }
 
         #msg {
-            color: var(--error-text);
-            text-align: center;
             margin-top: 15px;
-            font-size: 14px;
-            min-height: 20px;
-            white-space: pre-wrap;
+            font-size: 13px;
+            color: var(--error);
+            font-weight: bold;
+            text-align: center;
+            min-height: 1.2em;
+        }
+
+        .footer {
+            margin-top: 40px;
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .footer a {
+            color: var(--text);
+            text-decoration: underline;
+        }
+
+        /* 手机适配 */
+        @media (max-width: 400px) {
+            .container { padding: 30px; }
         }
     </style>
 </head>
 
 <body>
-    <div class="card">
-        <h2 id="title">校园工作台 SSO 登录</h2>
+
+    <div class="container">
+        <div class="header">
+            <h1>SSO 登录</h1>
+        </div>
 
         <form id="loginForm">
-            <input type="text" id="username" placeholder="用户名" required autocomplete="username">
-            <input type="password" id="password" placeholder="密码" required autocomplete="current-password">
+            <div class="form-item">
+                <label>账号</label>
+                <input type="text" id="username" required autocomplete="username" placeholder="您的校园网账号">
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" id="password" autocomplete="current-password" placeholder="您的校园网密码">
+            </div>
+
+            <div class="options">
+                <input type="checkbox" id="rememberMe">
+                <label for="rememberMe" style="margin-bottom: 0;">记住我</label>
+            </div>
+
             <button type="submit" id="submitBtn">登录</button>
         </form>
 
-        <div id="agreementBox" style="text-align: center; margin-top: 15px;">
-            <a href="/auth/agreement" style="color: #888; font-size: 12px; text-decoration: none;">
-                登录即代表您同意《用户协议与隐私政策》
-            </a>
-        </div>
-
         <div id="msg"></div>
+
+        <div class="footer">
+            继续代表您已同意我们的<a href="/auth/agreement">用户协议与隐私政策</a>.
+        </div>
     </div>
 
     <script>
@@ -123,130 +203,67 @@
         const submitBtn = document.getElementById('submitBtn');
         const msg = document.getElementById('msg');
 
-        /**
-         * 原生 WebCrypto AES-GCM 加密函数
-         * 逻辑：
-         * 1. 将 Hex 密钥转为字节
-         * 2. 生成 12 字节随机 Nonce (IV)
-         * 3. 加密数据（包含 16 字节 Auth Tag）
-         * 4. 拼接 Nonce + Ciphertext + Tag 并转为 Base64
-         */
         async function webCryptoEncrypt(text, keyHex) {
             const encoder = new TextEncoder();
             const data = encoder.encode(text);
-
-            // 转换 Hex 密钥为 Uint8Array
-            const keyBytes = new Uint8Array(
-                keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
-            );
-
-            // 导入为 AES-GCM 密钥
-            const cryptoKey = await crypto.subtle.importKey(
-                'raw',
-                keyBytes,
-                { name: 'AES-GCM' },
-                false,
-                ['encrypt']
-            );
-
-            // 生成随机 12 字节 Nonce (初始化向量)
+            const keyBytes = new Uint8Array(keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+            const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
             const iv = crypto.getRandomValues(new Uint8Array(12));
-
-            // 执行加密
-            const ciphertextBuffer = await crypto.subtle.encrypt(
-                { name: 'AES-GCM', iv: iv },
-                cryptoKey,
-                data
-            );
-
-            // 拼接：[Nonce(12字节)] + [密文 + Tag(剩余部分)]
+            const ciphertextBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, cryptoKey, data);
             const combined = new Uint8Array(iv.length + ciphertextBuffer.byteLength);
             combined.set(iv);
             combined.set(new Uint8Array(ciphertextBuffer), iv.length);
-
-            // 转换为标准 Base64 字符串
             return btoa(String.fromCharCode(...combined));
         }
 
-        /**
-         * 核心登录逻辑
-         */
         loginForm.onsubmit = async (e) => {
             e.preventDefault();
-
-            const originalBtnText = "登录";
             submitBtn.disabled = true;
-            submitBtn.innerText = "安全连接中...";
+            submitBtn.innerText = "连接中...";
             msg.innerText = "";
 
             try {
-                // 1. 从 URL 获取 OAuth2 参数
                 const urlParams = new URLSearchParams(window.location.search);
                 const clientId = urlParams.get('client_id');
                 const redirectUri = urlParams.get('redirect_uri');
                 const oauthState = urlParams.get('state');
 
-                if (!clientId || !redirectUri) {
-                    throw new Error("缺少 client_id 或 redirect_uri 参数");
-                }
+                if (!clientId || !redirectUri) throw new Error("Missing Auth Params");
 
-                // 2. 从后端获取共享密钥配置 (shared_key)
                 const configRes = await fetch('/auth/crypto-config');
-                if (!configRes.ok) throw new Error("无法初始化安全配置");
                 const { shared_key } = await configRes.json();
 
-                // 3. 构造明文载荷: "用户名|密码|时间戳"
-                const usernameVal = document.getElementById('username').value;
-                const passwordVal = document.getElementById('password').value;
-                const timestamp = Math.floor(Date.now() / 1000);
-                const rawPayload = `${usernameVal}|${passwordVal}|${timestamp}`;
-
-                // 4. 使用 WebCrypto 加密
+                const rawPayload = `${document.getElementById('username').value}|${document.getElementById('password').value}|${Math.floor(Date.now() / 1000)}`;
                 const encryptedData = await webCryptoEncrypt(rawPayload, shared_key);
 
-                // 5. 提交登录请求
                 const res = await fetch('/auth/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         encrypted_payload: encryptedData,
+                        remember: document.getElementById('rememberMe').checked,
                         client_id: clientId,
                         redirect_uri: redirectUri,
                         state: oauthState
                     })
                 });
 
-                // 6. 处理响应
+                const resText = await res.text();
                 if (res.ok) {
-                    const data = await res.json();
-                    // 登录成功，跳转回应用并携带授权码
-                    submitBtn.innerText = "正在跳转...";
+                    const data = JSON.parse(resText);
                     const target = new URL(data.redirect_uri);
                     target.searchParams.set('code', data.code);
                     if (data.state) target.searchParams.set('state', data.state);
                     window.location.href = target.toString();
                 } else {
-                    // 处理错误：显示后端返回的错误信息（如：用户被封禁的原因）
-                    const errText = await res.text();
-                    let errorMessage = "登录失败";
-                    try {
-                        // 尝试解析 JSON 错误格式
-                        const errJson = JSON.parse(errText);
-                        errorMessage = errJson.message || errorMessage;
-                    } catch (e) {
-                        // 如果后端直接返回字符串描述
-                        errorMessage = errText || errorMessage;
-                    }
-                    msg.innerText = errorMessage;
-                    submitBtn.disabled = false;
-                    submitBtn.innerText = originalBtnText;
+                    let errStr = "错误";
+                    try { errStr = JSON.parse(resText).message || resText; } catch (e) { errStr = resText; }
+                    throw new Error(errStr);
                 }
-
             } catch (err) {
-                console.error("Login Error:", err);
-                msg.innerText = "系统错误: " + err.message;
+                msg.innerText = ">> " + err.message;
                 submitBtn.disabled = false;
-                submitBtn.innerText = originalBtnText;
+                submitBtn.innerText = "登录";
             }
         };
     </script>
