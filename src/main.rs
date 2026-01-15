@@ -4,11 +4,12 @@ use aes_gcm::{
 };
 use axum::{
     Router,
-    extract::{Form, State},
+    extract::{Form, Query, State},
     http::{Method, StatusCode},
-    response::{Html, IntoResponse, Json, Response},
+    response::{Html, IntoResponse, Json, Redirect, Response},
     routing::{get, post},
 };
+use axum_extra::extract::cookie::{Cookie, CookieJar};
 use base64::{Engine as _, engine::general_purpose};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
 use rand::thread_rng;
@@ -17,21 +18,21 @@ use rsa::{
     pkcs8::{DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding},
     traits::PublicKeyParts,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use std::{
     collections::HashMap,
     fs,
     sync::{Arc, Mutex, RwLock},
 };
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::{Any, CorsLayer};
-use std::net::SocketAddr;
 use uuid::Uuid;
 
-// --- 1. 配置与结构体定义 ---
+// --- 数据结构 ---
 
 #[derive(Deserialize, Clone)]
 struct ClientConfig {
@@ -71,20 +72,17 @@ struct AuthSession {
     client_id: String,
 }
 
-/// 全局应用状态
 struct AppState {
     config: AppConfig,
     http_client: reqwest::Client,
     keys: RwLock<Arc<ServerKeys>>,
     code_store: Mutex<HashMap<String, AuthSession>>,
-    // 关键修复：存储数据库路径而非 Connection 对象。
-    // rusqlite::Connection 是 !Send 的，放进 State 会导致 Handler 编译报错。
     db_path: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 struct LoginRequest {
-    encrypted_payload: String, // 前端加密的 username|password|ts
+    encrypted_payload: Option<String>, // 只有在提交表单时存在
     client_id: String,
     redirect_uri: String,
     state: Option<String>,
@@ -106,7 +104,9 @@ struct Claims {
     iat: usize,
 }
 
-// --- 2. 数据库初始化 ---
+const JINCAI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3noDWNtbDpANbjt5Iwu2NFeDwU16Ec87ToqeoIm2KI+cOs81JP9aTDk/jkAlU97mN8wZkEMDr5utAZtMVht7GLX33Wx9XjqxUsDfsGkqNL8dXJklWDu9Zh80Ui2Ug+340d5dZtKtd+nv09QZqGjdnSp9PTfFDBY133QIDAQAB";
+
+// --- 数据库操作 ---
 
 fn init_db(path: &str) {
     let conn = Connection::open(path).expect("无法打开数据库文件");
@@ -116,18 +116,17 @@ fn init_db(path: &str) {
             username TEXT UNIQUE,
             external_uid TEXT,
             full_name TEXT,
-            role TEXT DEFAULT 'user'
+            role TEXT DEFAULT 'user',
+            state INTEGER DEFAULT 0,
+            state_description TEXT
         );",
         [],
     )
     .expect("初始化用户表失败");
 }
 
-// --- 3. 业务逻辑与加密工具 (全部保留) ---
+// --- 辅助工具函数 ---
 
-const JINCAI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3noDWNtbDpANbjt5Iwu2NFeDwU16Ec87ToqeoIm2KI+cOs81JP9aTDk/jkAlU97mN8wZkEMDr5utAZtMVht7GLX33Wx9XjqxUsDfsGkqNL8dXJklWDu9Zh80Ui2Ug+340d5dZtKtd+nv09QZqGjdnSp9PTfFDBY133QIDAQAB";
-
-/// 使用金财公钥进行 RSA 加密
 fn encrypt_for_jincai(data: HashMap<String, String>) -> HashMap<String, String> {
     let pub_key_der = general_purpose::STANDARD.decode(JINCAI_PUB_KEY).unwrap();
     let pub_key = RsaPublicKey::from_public_key_der(&pub_key_der).unwrap();
@@ -142,7 +141,6 @@ fn encrypt_for_jincai(data: HashMap<String, String>) -> HashMap<String, String> 
     out
 }
 
-/// 获取金财系统的临时 XToken (爬虫逻辑)
 async fn get_xtoken() -> Result<String, String> {
     let client = reqwest::Client::new();
     let resp = client
@@ -166,7 +164,6 @@ async fn get_xtoken() -> Result<String, String> {
         .ok_or("XToken 值为空".into())
 }
 
-/// 获取金财系统用户信息 (爬虫逻辑)
 async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String), String> {
     let client = reqwest::Client::new();
     let url = "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCAPW1002";
@@ -192,34 +189,39 @@ async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String), St
     Ok((xuid, xuxm))
 }
 
-/// AES 解密前端传来的登录信息
 fn decrypt_frontend_payload(
-    payload: &str,
+    payload_b64: &str,
     key_hex: &str,
     skew: i64,
 ) -> Result<(String, String), String> {
-    let key_bytes = hex::decode(key_hex).map_err(|_| "密钥 Hex 格式错误")?;
+    let key_bytes = hex::decode(key_hex).map_err(|_| "密钥格式错误")?;
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);
+
     let enc_data = general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|_| "Base64 解码失败")?;
-    if enc_data.len() < 12 {
-        return Err("Payload 长度不足".into());
+        .decode(payload_b64)
+        .map_err(|_| "Base64解码失败")?;
+
+    if enc_data.len() < 12 + 16 {
+        return Err("Payload长度异常".into());
     }
-    let (nonce_bytes, ciphertext) = enc_data.split_at(12);
+    let (nonce_bytes, encrypted_body) = enc_data.split_at(12);
+
     let decrypted = cipher
-        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
-        .map_err(|_| "AES 解密失败")?;
-    let s = String::from_utf8(decrypted).map_err(|_| "UTF8 转换失败")?;
+        .decrypt(Nonce::from_slice(nonce_bytes), encrypted_body)
+        .map_err(|e| format!("AES解密失败: {}", e))?;
+
+    let s = String::from_utf8(decrypted).map_err(|_| "UTF8转换失败")?;
     let parts: Vec<&str> = s.split('|').collect();
     if parts.len() != 3 {
-        return Err("Payload 格式错误".into());
+        return Err("数据格式错误".into());
     }
-    let ts: i64 = parts[2].parse().map_err(|_| "时间戳格式错误")?;
+
+    let ts: i64 = parts[2].parse().map_err(|_| "时间戳非法")?;
     if (chrono::Utc::now().timestamp() - ts).abs() > skew {
-        return Err("请求已过期 (Clock Skew)".into());
+        return Err("请求已过期".into());
     }
+
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
@@ -232,28 +234,95 @@ fn generate_new_keys() -> ServerKeys {
     }
 }
 
-// --- 4. 路由处理器 (修复参数顺序) ---
+// --- 路由处理器 ---
 
-/// OIDC 配置发现
-async fn oidc_config(State(state): State<Arc<AppState>>) -> Response {
-    Json(json!({
-        "issuer": state.config.issuer,
-        "authorization_endpoint": format!("{}/auth/", state.config.issuer),
-        "token_endpoint": format!("{}/auth/token", state.config.issuer),
-        "userinfo_endpoint": format!("{}/auth/userinfo", state.config.issuer),
-        "jwks_uri": format!("{}/auth/jwks", state.config.issuer),
-        "response_types_supported": ["code"],
-        "id_token_signing_alg_values_supported": ["RS256"]
-    }))
-    .into_response()
+async fn login_page_handler(
+    jar: CookieJar,
+    Query(_params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(cookie) = jar.get("sso_session") {
+        let username = cookie.value().to_string();
+        match tokio::fs::read_to_string("static/continue.html").await {
+            Ok(html) => {
+                // 将 HTML 中的占位符 {{username}} 替换为实际用户名
+                let personalized_html = html.replace("{{username}}", &username);
+                return Html(personalized_html).into_response();
+            }
+            Err(_) => return (StatusCode::NOT_FOUND, "continue.html不存在").into_response(),
+        }
+    }
+
+    match tokio::fs::read_to_string("static/login.html").await {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "login.html不存在").into_response(),
+    }
 }
 
-/// 登录逻辑处理器 (核心修改：State 在前)
+async fn logout_handler(
+    jar: CookieJar,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let query_str = serde_urlencoded::to_string(&params).unwrap_or_default();
+    
+    // 构建一个立即过期的 Cookie 来强制覆盖并清除
+    let remove_cookie = Cookie::build(("sso_session", ""))
+        .path("/")
+        .http_only(true)
+        .max_age(time::Duration::ZERO) // 立即过期
+        .build();
+
+    (
+        jar.add(remove_cookie),
+        // 重定向回 /auth/ 并带上原始参数，此时因为 Cookie 已删，login_page_handler 会渲染 login.html
+        Redirect::to(&format!("/auth/?{}", query_str)),
+    )
+}
+
+async fn continue_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Query(payload): Query<LoginRequest>,
+) -> Response {
+    let username = match jar.get("sso_session") {
+        Some(c) => c.value().to_string(),
+        None => return (StatusCode::UNAUTHORIZED, "会话已过期").into_response(),
+    };
+
+    let conn = Connection::open(&state.db_path).unwrap();
+    let user_row: Option<(i32, Option<String>)> = conn
+        .query_row(
+            "SELECT state, state_description FROM users WHERE username = ?1",
+            [&username],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .unwrap();
+
+    // State 系统检查：当为非 0（且非 Bypass 状态 3）时，拒绝并返回描述
+    if let Some((st, desc)) = user_row {
+        if st == 1 || st == 2 {
+            return (
+                StatusCode::FORBIDDEN,
+                desc.unwrap_or_else(|| "账户已锁定".into()),
+            ).into_response();
+        }
+    }
+
+    // 自动重定向逻辑：返回与正常登录相同的 JSON，由前端执行最终跳转以保持一致性
+    issue_code_response(
+        &state,
+        username,
+        payload.client_id,
+        payload.redirect_uri,
+        payload.state,
+    )
+}
+
 async fn login_handler(
     State(state): State<Arc<AppState>>,
+    jar: CookieJar,
     Json(payload): Json<LoginRequest>,
 ) -> Response {
-    // 1. 客户端合法性检查
     let client = state
         .config
         .clients
@@ -271,9 +340,12 @@ async fn login_handler(
         return (StatusCode::FORBIDDEN, "无效的重定向 URI").into_response();
     }
 
-    // 2. 解密登录报文
+    let enc_payload = match &payload.encrypted_payload {
+        Some(p) => p,
+        None => return (StatusCode::BAD_REQUEST, "Missing payload").into_response(),
+    };
     let (user, pass) = match decrypt_frontend_payload(
-        &payload.encrypted_payload,
+        enc_payload,
         &state.config.frontend_crypto.shared_key,
         state.config.frontend_crypto.max_clock_skew_secs,
     ) {
@@ -281,16 +353,60 @@ async fn login_handler(
         Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
     };
 
-    // 3. 对接金财系统
+    let conn = Connection::open(&state.db_path).unwrap();
+
+    let local_user: Option<(i32, Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT state, state_description, external_uid, full_name FROM users WHERE username = ?1",
+            [&user],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional().unwrap();
+
+    if let Some((st, desc, xuid, xuxm)) = local_user {
+        // State 拒绝系统：状态为 1, 2 时向前端返回 description
+        if st == 1 || st == 2 {
+            return (
+                StatusCode::FORBIDDEN,
+                desc.unwrap_or_else(|| "账号被限制".into()),
+            ).into_response();
+        }
+        
+        // Bypass 逻辑 (State 3)
+        if st == 3 {
+            return (
+                jar.add(create_sso_cookie(user.clone())),
+                issue_code_response(
+                    &state,
+                    user,
+                    payload.client_id,
+                    payload.redirect_uri,
+                    payload.state,
+                ),
+            ).into_response();
+        }
+        
+        // 自动同步检查：检查 xuid 和 xuxm 是否有空字段
+        if xuid.is_none() || xuxm.is_none() || xuid.as_ref().unwrap().is_empty() || xuxm.as_ref().unwrap().is_empty() {
+            return perform_jincai_login_and_sync(state, jar, user, pass, payload, conn).await;
+        }
+    } else {
+        return perform_jincai_login_and_sync(state, jar, user, pass, payload, conn).await;
+    }
+
+    perform_jincai_login_and_sync(state, jar, user, pass, payload, conn).await
+}
+
+async fn perform_jincai_login_and_sync(
+    state: Arc<AppState>,
+    jar: CookieJar,
+    user: String,
+    pass: String,
+    payload: LoginRequest,
+    conn: Connection,
+) -> Response {
     let xtoken = match get_xtoken().await {
         Ok(t) => t,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"message": format!("获取 XToken 失败: {}", e)})),
-            )
-                .into_response();
-        }
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("XToken 失败: {}", e)).into_response(),
     };
 
     let mut data = HashMap::new();
@@ -315,47 +431,61 @@ async fn login_handler(
         }
 
         if r.json::<Value>().await.unwrap_or_default()["succeed"] == "1" {
-            // 4. 数据库持久化：即时打开连接
-            let conn = Connection::open(&state.db_path).unwrap();
-            let user_exists: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
-                    [&user],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
-            if !user_exists {
-                let new_id = Uuid::new_v4().to_string();
-                if let Ok((xuid, xuxm)) = get_external_user_info(&pzl_cookie).await {
-                    let _ = conn.execute("INSERT INTO users (id, username, external_uid, full_name, role) VALUES (?1, ?2, ?3, ?4, ?5)", [&new_id, &user, &xuid, &xuxm, "user"]);
-                } else {
-                    let _ = conn.execute(
-                        "INSERT INTO users (id, username, role) VALUES (?1, ?2, ?3)",
-                        [&new_id, &user, "user"],
-                    );
-                }
-            }
+            let (xuid, xuxm) = get_external_user_info(&pzl_cookie)
+                .await
+                .unwrap_or(("unknown".into(), "unknown".into()));
 
-            // 5. 发放 Code
-            let code = Uuid::new_v4().to_string();
-            state.code_store.lock().unwrap().insert(
-                code.clone(),
-                AuthSession {
-                    username: user,
-                    client_id: payload.client_id,
-                },
+            let _ = conn.execute(
+                "INSERT INTO users (id, username, external_uid, full_name, role, state) 
+                 VALUES (?1, ?2, ?3, ?4, 'user', 0)
+                 ON CONFLICT(username) DO UPDATE SET external_uid=?3, full_name=?4",
+                params![Uuid::new_v4().to_string(), user, xuid, xuxm],
             );
-            return Json(json!({ "code": code, "redirect_uri": payload.redirect_uri, "state": payload.state })).into_response();
+
+            return (
+                jar.add(create_sso_cookie(user.clone())),
+                issue_code_response(
+                    &state,
+                    user,
+                    payload.client_id,
+                    payload.redirect_uri,
+                    payload.state,
+                ),
+            ).into_response();
         }
     }
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({"message": "第三方验证失败"})),
-    )
+    (StatusCode::UNAUTHORIZED, "第三方验证失败").into_response()
+}
+
+fn create_sso_cookie(username: String) -> Cookie<'static> {
+    Cookie::build(("sso_session", username))
+        .path("/")
+        .http_only(true)
+        .max_age(time::Duration::days(7))
+        .build()
+}
+
+fn issue_code_response(
+    state: &Arc<AppState>,
+    username: String,
+    client_id: String,
+    redirect_uri: String,
+    oauth_state: Option<String>,
+) -> Response {
+    let code = Uuid::new_v4().to_string();
+    state.code_store.lock().unwrap().insert(
+        code.clone(),
+        AuthSession {
+            username,
+            client_id,
+        },
+    );
+    Json(json!({ "code": code, "redirect_uri": redirect_uri, "state": oauth_state }))
         .into_response()
 }
 
-/// Token 交换
+// --- OIDC 处理器 (保持原样) ---
+
 async fn token_exchange_handler(
     State(state): State<Arc<AppState>>,
     Form(payload): Form<TokenExchangeRequest>,
@@ -382,7 +512,6 @@ async fn token_exchange_handler(
             )
                 .into_response();
         }
-
         let now = chrono::Utc::now().timestamp() as usize;
         let claims = Claims {
             iss: state.config.issuer.clone(),
@@ -391,7 +520,6 @@ async fn token_exchange_handler(
             iat: now,
             exp: now + 3600,
         };
-
         let current_keys = state.keys.read().unwrap().clone();
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(current_keys.kid.clone());
@@ -404,7 +532,6 @@ async fn token_exchange_handler(
         )
         .unwrap();
         let token = encode(&header, &claims, &encoding_key).unwrap();
-
         Json(json!({ "access_token": token, "id_token": token, "token_type": "Bearer", "expires_in": 3600 })).into_response()
     } else {
         (
@@ -415,7 +542,6 @@ async fn token_exchange_handler(
     }
 }
 
-/// UserInfo 接口
 async fn userinfo_handler(
     State(state): State<Arc<AppState>>,
     header: axum::http::HeaderMap,
@@ -424,7 +550,6 @@ async fn userinfo_handler(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "));
-
     if token_str.is_none() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -432,7 +557,6 @@ async fn userinfo_handler(
         )
             .into_response();
     }
-
     let keys = state.keys.read().unwrap();
     let decoding_key = DecodingKey::from_rsa_pem(
         keys.private_key
@@ -444,7 +568,6 @@ async fn userinfo_handler(
     .unwrap();
     let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
     validation.validate_aud = false;
-
     match jsonwebtoken::decode::<Claims>(token_str.unwrap(), &decoding_key, &validation) {
         Ok(token_data) => {
             let conn = Connection::open(&state.db_path).unwrap();
@@ -465,7 +588,6 @@ async fn userinfo_handler(
     }
 }
 
-/// JWKS 导出
 async fn jwks_handler(State(state): State<Arc<AppState>>) -> Response {
     let keys = state.keys.read().unwrap().clone();
     let pub_key = keys.private_key.to_public_key();
@@ -474,32 +596,12 @@ async fn jwks_handler(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({ "keys": [{ "kty": "RSA", "alg": "RS256", "use": "sig", "kid": keys.kid, "n": n, "e": e }] })).into_response()
 }
 
-async fn get_crypto_config(State(state): State<Arc<AppState>>) -> Response {
-    Json(json!({ "shared_key": state.config.frontend_crypto.shared_key })).into_response()
+async fn crypto_config_handler(State(state): State<Arc<AppState>>) -> Response {
+    Json(json!({
+        "shared_key": state.config.frontend_crypto.shared_key
+    }))
+    .into_response()
 }
-
-async fn login_page_handler() -> Response {
-    match tokio::fs::read_to_string("static/login.html").await {
-        Ok(html) => Html(html).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "Login page not found").into_response(),
-    }
-}
-
-async fn agreement_page_handler() -> Response {
-    match tokio::fs::read_to_string("static/agreement.html").await {
-        Ok(html) => Html(html).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "协议模板文件不存在").into_response(),
-    }
-}
-
-async fn agreement_file_handler() -> Response {
-    match tokio::fs::read_to_string("static/agreement.md").await {
-        Ok(html) => Html(html).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "协议模板文件不存在").into_response(),
-    }
-}
-
-// --- 5. 主程序入口 ---
 
 #[tokio::main]
 async fn main() {
@@ -523,29 +625,29 @@ async fn main() {
         db_path,
     });
 
-    // 频率限制中间件 (使用配置值)
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(1) 
+            .per_second(1)
             .burst_size(config.rate_limit.per_second as u32)
-            .key_extractor(PeerIpKeyExtractor) 
-            // 关键：开启此项后，如果有 Nginx 代理，它会读取 X-Forwarded-For
-            // 如果没有 Nginx，它会回退到从 ConnectInfo 中提取 Peer IP
-            .use_headers() 
+            .key_extractor(PeerIpKeyExtractor)
+            .use_headers()
             .finish()
             .unwrap(),
     );
 
     let app = Router::new()
+        .route("/auth/crypto-config", get(crypto_config_handler))
         .route("/auth/login", post(login_handler))
         .route("/auth/", get(login_page_handler))
-        .route("/auth/agreement", get(agreement_page_handler))
-        .route("/auth/agreement.md", get(agreement_file_handler))
+        .route("/auth/continue", get(continue_handler))
+        .route("/auth/logout", get(logout_handler))
         .route("/auth/token", post(token_exchange_handler))
-        .route("/auth/jwks", get(jwks_handler))
         .route("/auth/userinfo", get(userinfo_handler))
-        .route("/auth/crypto-config", get(get_crypto_config))
-        .route("/.well-known/openid-configuration", get(oidc_config))
+        .route("/auth/jwks", get(jwks_handler))
+        .route(
+            "/.well-known/openid-configuration",
+            get(|s| async { oidc_config(s).await }),
+        )
         .layer(GovernorLayer {
             config: governor_conf,
         })
@@ -560,9 +662,22 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     println!("服务运行在 http://{}", addr);
     axum::serve(
-        listener, 
-        app.into_make_service_with_connect_info::<SocketAddr>()
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
     .unwrap();
+}
+
+async fn oidc_config(State(state): State<Arc<AppState>>) -> Response {
+    Json(json!({
+        "issuer": state.config.issuer,
+        "authorization_endpoint": format!("{}/auth/", state.config.issuer),
+        "token_endpoint": format!("{}/auth/token", state.config.issuer),
+        "userinfo_endpoint": format!("{}/auth/userinfo", state.config.issuer),
+        "jwks_uri": format!("{}/auth/jwks", state.config.issuer),
+        "response_types_supported": ["code"],
+        "id_token_signing_alg_values_supported": ["RS256"]
+    }))
+    .into_response()
 }

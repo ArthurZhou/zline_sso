@@ -18,6 +18,13 @@
                 "http://localhost:5244/auth/oidc/callback",
                 "https://172.16.20.111/nas/api/auth/sso_callback"
             ]
+        },
+        {
+            "client_id": "test_client",
+            "client_secret": "test_client_secret",
+            "redirect_uris": [
+                "http://127.0.0.1:8080/callback"
+            ]
         }
     ]
 }

@@ -4,28 +4,33 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Web 框架 (保持 Axum 默认，即 HTTP)
-axum = { version = "0.7", features = ["macros"] }
+# HTTP
+axum = { version = "0.7.9", features = ["macros"] }
+axum-extra = { version = "0.9.6", features = ["cookie"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tower_governor = "0.4"
 
-# 序列化与数据
+# 序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_urlencoded = "0.7"
 uuid = { version = "1.0", features = ["v4"] }
 chrono = "0.4"
 
 # 数据库
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-# 加密与安全
-rsa = { version = "0.9", features = ["pem"] }
+# 加密与安全 (注意：base64 0.22 的 API 有变动，如果你代码用的是 0.21，请改回 0.21)
+rsa = { version = "0.9", features = ["pem", "sha2"] }
 aes-gcm = "0.10"
 jsonwebtoken = "9.0"
-base64 = "0.22"
+base64 = "0.21" 
 hex = "0.4"
 rand = "0.8"
 
-# HTTP客户端
-reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
+# HTTP 客户端 (reqwest 0.12 默认使用 hyper 1.0，与 axum 0.7 配合建议使用 0.11 或保持现状但注意冲突)
+reqwest = { version = "0.11", features = ["json", "cookies"] }
+
+time = "0.3"
+url = "2.5.8"
