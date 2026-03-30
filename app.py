@@ -15,9 +15,7 @@ def index():
     if user:
         return f"""
         <h1>登录成功</h1>
-        <p><b>用户 ID (sub):</b> {user.get('sub')}</p>
-        <p><b>角色 (role):</b> {user.get('role')}</p>
-        <p><b>用户名:</b> {user.get('preferred_username')}</p>
+        <p>{user}</p>
         <hr>
         <a href='/logout'>登出</a>
         """

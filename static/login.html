@@ -250,6 +250,7 @@
 
                 const resText = await res.text();
                 if (res.ok) {
+                    submitBtn.innerText = "跳转中...";
                     const data = JSON.parse(resText);
                     const target = new URL(data.redirect_uri);
                     target.searchParams.set('code', data.code);

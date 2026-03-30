@@ -40,6 +40,7 @@ struct ClientConfig {
     client_id: String,
     client_secret: String,
     redirect_uris: Vec<String>,
+    return_extra_userinfo: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -292,13 +293,22 @@ async fn continue_handler(
     };
 
     // 2. 【关键修复】必须校验 Client ID 是否在 config.json 中
-    let client = state.config.clients.iter().find(|c| c.client_id == payload.client_id);
+    let client = state
+        .config
+        .clients
+        .iter()
+        .find(|c| c.client_id == payload.client_id);
     if client.is_none() {
         return (StatusCode::BAD_REQUEST, "无效的 Client ID").into_response();
     }
 
     // 3. 【关键修复】必须校验重定向 URI 是否合法
-    if !client.unwrap().redirect_uris.iter().any(|uri| payload.redirect_uri.starts_with(uri)) {
+    if !client
+        .unwrap()
+        .redirect_uris
+        .iter()
+        .any(|uri| payload.redirect_uri.starts_with(uri))
+    {
         return (StatusCode::FORBIDDEN, "无效的重定向 URI").into_response();
     }
 
@@ -315,7 +325,11 @@ async fn continue_handler(
 
     if let Some((st, desc)) = user_row {
         if st == 1 || st == 2 {
-            return (StatusCode::FORBIDDEN, desc.unwrap_or_else(|| "账户已锁定".into())).into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                desc.unwrap_or_else(|| "账户已锁定".into()),
+            )
+                .into_response();
         }
     }
 
@@ -603,15 +617,50 @@ async fn userinfo_handler(
     validation.validate_aud = false;
     match jsonwebtoken::decode::<Claims>(token_str.unwrap(), &decoding_key, &validation) {
         Ok(token_data) => {
+            let username = &token_data.claims.sub;
+            let client_id = &token_data.claims.aud;
+
             let conn = Connection::open(&state.db_path).unwrap();
-            let role: String = conn
+
+            // 1. 获取用户完整行数据
+            let user_info: Option<(String, String, String)> = conn
                 .query_row(
-                    "SELECT role FROM users WHERE username = ?1",
-                    [&token_data.claims.sub],
-                    |row| row.get(0),
+                    "SELECT role, external_uid, full_name FROM users WHERE username = ?1",
+                    [username],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-                .unwrap_or_else(|_| "user".to_string());
-            Json(json!({ "sub": token_data.claims.sub, "role": role, "preferred_username": token_data.claims.sub })).into_response()
+                .optional()
+                .unwrap();
+
+            let (role, xuid, xuxm) =
+                user_info.unwrap_or_else(|| ("user".into(), "".into(), "".into()));
+
+            // 2. 基础返回字段
+            let mut resp_data = json!({
+                "sub": username,
+                "preferred_username": username,
+                "role": role,
+            });
+
+            // 3. 根据配置自动匹配并追加 extra 字段
+            if let Some(client_conf) = state
+                .config
+                .clients
+                .iter()
+                .find(|c| &c.client_id == client_id)
+            {
+                for field in &client_conf.return_extra_userinfo {
+                    match field.as_str() {
+                        "name" => resp_data["name"] = json!(xuxm),
+                        "stuid" => resp_data["stuid"] = json!(xuid),
+                        "external_uid" => resp_data["external_uid"] = json!(xuid),
+                        "full_name" => resp_data["full_name"] = json!(xuxm),
+                        _ => {} // 未定义的字段不返回
+                    }
+                }
+            }
+
+            Json(resp_data).into_response()
         }
         Err(_) => (
             StatusCode::UNAUTHORIZED,
@@ -644,7 +693,8 @@ async fn font_handler() -> impl IntoResponse {
                 (header::CACHE_CONTROL, "public, max-age=2592000, immutable"),
             ],
             data,
-        ).into_response(),
+        )
+            .into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }

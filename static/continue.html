@@ -127,11 +127,16 @@
             opacity: 0.8;
         }
 
-        .info-text {
-            margin-top: 20px;
-            font-size: 12px;
+        .footer {
+            margin-top: 40px;
+            font-size: 11px;
             color: var(--muted);
-            text-align: center;
+            line-height: 1.6;
+        }
+
+        .footer a {
+            color: var(--text);
+            text-decoration: underline;
         }
     </style>
 </head>
@@ -152,8 +157,8 @@
             <button class="btn btn-secondary" onclick="handleLogout()">退出并切换</button>
         </div>
 
-        <div class="info-text">
-            登录跳转页
+        <div class="footer">
+            继续代表您已同意我们的<a href="/auth/agreement">用户协议与隐私政策</a>.
         </div>
     </div>
 
