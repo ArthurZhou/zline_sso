@@ -1,2 +1,4 @@
 /target
 users.db
+/frontend/node_modules
+/static
