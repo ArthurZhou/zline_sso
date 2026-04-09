@@ -685,20 +685,6 @@ async fn crypto_config_handler(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
-async fn font_handler() -> impl IntoResponse {
-    match tokio::fs::read("static/font.woff").await {
-        Ok(data) => (
-            [
-                (header::CONTENT_TYPE, "font/woff"),
-                (header::CACHE_CONTROL, "public, max-age=2592000, immutable"),
-            ],
-            data,
-        )
-            .into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let config_str = fs::read_to_string("config.json").expect("config.json 缺失");
@@ -735,7 +721,6 @@ async fn main() {
         .route("/auth/crypto-config", get(crypto_config_handler))
         .route_service("/auth/agreement", ServeFile::new("static/agreement.html"))
         .route_service("/auth/agreement.md", ServeFile::new("static/AGREEMENT.md"))
-        .route("/auth/font.woff", get(font_handler))
         .route("/auth/login", post(login_handler))
         .route("/auth/", get(login_page_handler))
         .route("/auth/continue", get(continue_handler))
