@@ -179,14 +179,18 @@ pub async fn login_with_jincai(
         }
     }
 
-    // 步骤5: 验证登录响应
+    // 步骤5: 验证登录响应并提取错误信息
     let body = resp
         .json::<serde_json::Value>()
         .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+        .unwrap_or_default();
 
-    if body.get("succeed").and_then(|v| v.as_str()) != Some("1") {
-        return Err("Login failed".to_string());
+    if body["succeed"] != "1" {
+        let error_msg = body
+            .get("errorMsg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Login failed");
+        return Err(error_msg.to_string());
     }
 
     // 步骤6: 获取用户信息
