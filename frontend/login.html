@@ -161,7 +161,9 @@
 
         /* 手机适配 */
         @media (max-width: 400px) {
-            .container { padding: 30px; }
+            .container {
+                padding: 30px;
+            }
         }
     </style>
 </head>
@@ -251,26 +253,34 @@
 
                 const resText = await res.text();
                 if (res.ok) {
-                    submitBtn.innerText = "跳转中...";
+
                     const data = JSON.parse(resText);
-                    
-                    // 处理直接登录响应
-                    if (data.is_direct_login) {
-                        window.location.href = data.redirect_uri;
+
+                    if (!data.error) {
+                        submitBtn.innerText = "跳转中...";
+                        // 处理直接登录响应
+                        if (data.is_direct_login) {
+                            window.location.href = data.redirect_uri;
+                        } else {
+                            // 处理OAuth响应
+                            const target = new URL(data.redirect_uri);
+                            target.searchParams.set('code', data.code);
+                            if (data.state) target.searchParams.set('state', data.state);
+                            window.location.href = target.toString();
+                        }
                     } else {
-                        // 处理OAuth响应
-                        const target = new URL(data.redirect_uri);
-                        target.searchParams.set('code', data.code);
-                        if (data.state) target.searchParams.set('state', data.state);
-                        window.location.href = target.toString();
+                        msg.innerText = data.error;
+                        submitBtn.disabled = false;
+                        submitBtn.innerText = "登录";
                     }
+
                 } else {
                     let errStr = "错误";
-                    try { errStr = JSON.parse(resText).message || resText; } catch (e) { errStr = resText; }
+                    try { errStr = JSON.parse(resText).error || resText; } catch (e) { errStr = resText; }
                     throw new Error(errStr);
                 }
             } catch (err) {
-                msg.innerText = ">> " + err.message;
+                msg.innerText = err.message;
                 submitBtn.disabled = false;
                 submitBtn.innerText = "登录";
             }
