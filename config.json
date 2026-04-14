@@ -1,5 +1,5 @@
 {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 8097,
     "issuer": "http://127.0.0.1:8097",
     "frontend_crypto": {
@@ -7,19 +7,9 @@
         "max_clock_skew_secs": 300
     },
     "rate_limit": {
-        "per_second": 8
+        "per_second": 20
     },
     "clients": [
-        {
-            "client_id": "alist",
-            "client_secret": "kLS2V_Q_XZ-9A4WPL2lSo_xQFe8pmHBKs64MC1AzfBQ",
-            "redirect_uris": [
-                "https://jc.d2lib.com/nas/api/auth/sso_callback",
-                "http://localhost:5244/auth/oidc/callback",
-                "https://172.16.20.111/nas/api/auth/sso_callback"
-            ],
-            "return_extra_userinfo": []
-        },
         {
             "client_id": "test_client",
             "client_secret": "test_client_secret",
