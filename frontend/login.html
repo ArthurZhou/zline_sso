@@ -224,11 +224,12 @@
 
             try {
                 const urlParams = new URLSearchParams(window.location.search);
-                const clientId = urlParams.get('client_id');
-                const redirectUri = urlParams.get('redirect_uri');
-                const oauthState = urlParams.get('state');
+                const clientId = urlParams.get('client_id') || "";
+                const redirectUri = urlParams.get('redirect_uri') || "";
+                const oauthState = urlParams.get('state') || "";
 
-                if (!clientId || !redirectUri) throw new Error("Missing Auth Params");
+                // 如果没有client_id，则为直接登录模式（无OAuth）
+                const isDirectLogin = !clientId || clientId === "";
 
                 const configRes = await fetch('/auth/crypto-config');
                 const { shared_key } = await configRes.json();
@@ -252,10 +253,17 @@
                 if (res.ok) {
                     submitBtn.innerText = "跳转中...";
                     const data = JSON.parse(resText);
-                    const target = new URL(data.redirect_uri);
-                    target.searchParams.set('code', data.code);
-                    if (data.state) target.searchParams.set('state', data.state);
-                    window.location.href = target.toString();
+                    
+                    // 处理直接登录响应
+                    if (data.is_direct_login) {
+                        window.location.href = data.redirect_uri;
+                    } else {
+                        // 处理OAuth响应
+                        const target = new URL(data.redirect_uri);
+                        target.searchParams.set('code', data.code);
+                        if (data.state) target.searchParams.set('state', data.state);
+                        window.location.href = target.toString();
+                    }
                 } else {
                     let errStr = "错误";
                     try { errStr = JSON.parse(resText).message || resText; } catch (e) { errStr = resText; }

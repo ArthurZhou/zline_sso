@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>个人中心 - 校园工作台 SSO</title>
+    <style>
+        @font-face {
+            font-family: sarasa;
+            src: url('/font.woff');
+        }
+
+        :root {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --border: #1a1a1a;
+            --input-bg: #f2f2f2;
+            --accent: #000000;
+            --accent-text: #ffffff;
+            --error: #e63946;
+            --success: #06d6a0;
+            --muted: #666666;
+            --card-bg: #f9f9f9;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #121212;
+                --text: #eeeeee;
+                --border: #444444;
+                --input-bg: #1e1e1e;
+                --accent: #eeeeee;
+                --accent-text: #121212;
+                --muted: #888888;
+                --card-bg: #1e1e1e;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            margin: 0;
+            font-family: ui-monospace, sarasa, monospace;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            border-bottom: 4px solid var(--border);
+            margin-bottom: 30px;
+            padding-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            text-transform: uppercase;
+            font-weight: 900;
+        }
+
+        .header-right {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .btn-logout {
+            padding: 8px 16px;
+            background: var(--error);
+            color: var(--accent-text);
+            border: 2px solid var(--border);
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .btn-logout:hover {
+            opacity: 0.8;
+        }
+
+        .profile-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 2px solid var(--border);
+            padding: 20px;
+            border-radius: 4px;
+        }
+
+        .card h2 {
+            margin: 0 0 15px 0;
+            font-size: 14px;
+            text-transform: uppercase;
+            font-weight: 700;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 10px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            font-size: 13px;
+        }
+
+        .info-label {
+            font-weight: 700;
+            color: var(--muted);
+            text-transform: uppercase;
+        }
+
+        .info-value {
+            color: var(--text);
+            word-break: break-all;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            background: var(--success);
+            color: #000;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            border-radius: 2px;
+        }
+
+        .status-badge.locked {
+            background: var(--error);
+            color: white;
+        }
+
+        .loading {
+            text-align: center;
+            font-size: 13px;
+            color: var(--muted);
+            padding: 20px;
+        }
+
+        .error-message {
+            color: var(--error);
+            font-weight: 700;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: var(--card-bg);
+            border-left: 4px solid var(--error);
+        }
+
+        .footer {
+            margin-top: 40px;
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.6;
+            text-align: center;
+        }
+
+        .footer a {
+            color: var(--text);
+            text-decoration: underline;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 15px;
+            }
+
+            .header {
+                flex-direction: column;
+                gap: 15px;
+                align-items: flex-start;
+            }
+
+            .header-right {
+                width: 100%;
+            }
+
+            .btn-logout {
+                width: 100%;
+            }
+
+            .profile-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>个人中心</h1>
+            <div class="header-right">
+                <button class="btn-logout" id="logoutBtn">登出</button>
+            </div>
+        </div>
+
+        <div id="errorContainer"></div>
+
+        <div id="profileContent" class="loading">加载中...</div>
+    </div>
+
+    <div class="footer">
+        © 2026 校园工作台 SSO | 
+        <a href="/auth/agreement">用户协议与隐私政策</a>
+    </div>
+
+    <script>
+        async function loadProfile() {
+            try {
+                const response = await fetch('/auth/profile/api');
+                
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        window.location.href = '/auth/';
+                        return;
+                    }
+                    throw new Error('加载失败: ' + response.status);
+                }
+
+                const data = await response.json();
+                
+                let statusBadgeHtml = '<span class="status-badge">正常</span>';
+                if (data.state === 1 || data.state === 2) {
+                    statusBadgeHtml = '<span class="status-badge locked">已禁用</span>';
+                }
+
+                const profileHtml = `
+                    <div class="profile-grid">
+                        <div class="card">
+                            <h2>基本信息</h2>
+                            <div class="info-row">
+                                <span class="info-label">用户名</span>
+                                <span class="info-value">${escapeHtml(data.username)}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">全名</span>
+                                <span class="info-value">${escapeHtml(data.full_name || '-')}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">角色</span>
+                                <span class="info-value">${escapeHtml(data.role)}</span>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h2>账户状态</h2>
+                            <div class="info-row">
+                                <span class="info-label">状态</span>
+                                <span>${statusBadgeHtml}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">外部ID</span>
+                                <span class="info-value">${escapeHtml(data.external_uid || '-')}</span>
+                            </div>
+                            ${data.state === 1 || data.state === 2 ? 
+                                `<div class="info-row">
+                                    <span class="info-label">说明</span>
+                                    <span class="info-value" style="color: var(--error);">${escapeHtml(data.state_description || '账户已禁用')}</span>
+                                </div>` 
+                                : ''
+                            }
+                        </div>
+                    </div>
+                `;
+
+                document.getElementById('profileContent').innerHTML = profileHtml;
+
+            } catch (error) {
+                console.error('加载失败:', error);
+                const errorHtml = `
+                    <div class="error-message">
+                        >> ${escapeHtml(error.message)}
+                    </div>
+                    <div class="loading">
+                        <p>无法加载个人信息</p>
+                        <button class="btn-logout" onclick="location.reload()">重试</button>
+                    </div>
+                `;
+                document.getElementById('profileContent').innerHTML = errorHtml;
+            }
+        }
+
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
+
+        document.getElementById('logoutBtn').addEventListener('click', () => {
+            window.location.href = '/auth/logout';
+        });
+
+        // 页面加载时获取个人信息
+        loadProfile();
+    </script>
+</body>
+</html>

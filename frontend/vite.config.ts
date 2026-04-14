@@ -35,6 +35,7 @@ export default defineConfig({
         login: resolve(__dirname, 'login.html'),
         continue: resolve(__dirname, 'continue.html'),
         agreement: resolve(__dirname, 'agreement.html'),
+        profile: resolve(__dirname, 'profile.html'),
       },
     },
   },

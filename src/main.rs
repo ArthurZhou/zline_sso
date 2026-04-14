@@ -5,7 +5,7 @@ use aes_gcm::{
 use axum::{
     Router,
     extract::{Form, Query, State},
-    http::{Method, StatusCode, header},
+    http::{Method, StatusCode},
     response::{Html, IntoResponse, Json, Redirect, Response},
     routing::{get, post},
 };
@@ -85,8 +85,8 @@ struct AppState {
 #[derive(Deserialize, Debug, Clone)]
 struct LoginRequest {
     encrypted_payload: Option<String>,
-    client_id: String,
-    redirect_uri: String,
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
     state: Option<String>,
     remember: Option<bool>, // 新增字段，接收前端 checkbox 状态
 }
@@ -292,24 +292,34 @@ async fn continue_handler(
         None => return (StatusCode::UNAUTHORIZED, "会话已过期").into_response(),
     };
 
-    // 2. 【关键修复】必须校验 Client ID 是否在 config.json 中
-    let client = state
-        .config
-        .clients
-        .iter()
-        .find(|c| c.client_id == payload.client_id);
-    if client.is_none() {
-        return (StatusCode::BAD_REQUEST, "无效的 Client ID").into_response();
-    }
+    // 提取client_id和redirect_uri
+    let client_id = payload.client_id.clone().unwrap_or_default();
+    let redirect_uri = payload.redirect_uri.clone().unwrap_or_default();
+    
+    // 检查是否为直接登录模式（无client_id）
+    let is_direct_login = client_id.is_empty();
 
-    // 3. 【关键修复】必须校验重定向 URI 是否合法
-    if !client
-        .unwrap()
-        .redirect_uris
-        .iter()
-        .any(|uri| payload.redirect_uri.starts_with(uri))
-    {
-        return (StatusCode::FORBIDDEN, "无效的重定向 URI").into_response();
+    // 2. 【关键修复】必须校验 Client ID 是否在 config.json 中
+    // 只有当 client_id 不为空时，才验证其有效性
+    if !is_direct_login {
+        let client = state
+            .config
+            .clients
+            .iter()
+            .find(|c| c.client_id == client_id);
+        if client.is_none() {
+            return (StatusCode::BAD_REQUEST, "无效的 Client ID").into_response();
+        }
+
+        // 3. 【关键修复】必须校验重定向 URI 是否合法
+        if !client
+            .unwrap()
+            .redirect_uris
+            .iter()
+            .any(|uri| redirect_uri.starts_with(uri))
+        {
+            return (StatusCode::FORBIDDEN, "无效的重定向 URI").into_response();
+        }
     }
 
     // 4. 检查数据库中用户状态
@@ -333,13 +343,14 @@ async fn continue_handler(
         }
     }
 
-    // 5. 调用你已有的函数发放 code 并返回 JSON
-    issue_code_response(
+    // 5. 调用处理函数返回响应
+    handle_login_response(
         &state,
         username,
-        payload.client_id,
-        payload.redirect_uri,
+        payload.client_id.unwrap_or_default(),
+        payload.redirect_uri.unwrap_or_default(),
         payload.state,
+        is_direct_login,
     )
 }
 
@@ -348,21 +359,30 @@ async fn login_handler(
     jar: CookieJar,
     Json(payload): Json<LoginRequest>,
 ) -> Response {
-    let client = state
-        .config
-        .clients
-        .iter()
-        .find(|c| c.client_id == payload.client_id);
-    if client.is_none() {
-        return (StatusCode::BAD_REQUEST, "无效的 Client ID").into_response();
-    }
-    if !client
-        .unwrap()
-        .redirect_uris
-        .iter()
-        .any(|uri| payload.redirect_uri.starts_with(uri))
-    {
-        return (StatusCode::FORBIDDEN, "无效的重定向 URI").into_response();
+    // 检查 client_id 是否有效
+    // 如果 client_id 为空，则用户是直接访问 /auth/ 进行登录，允许并重定向到个人中心
+    let client_id = payload.client_id.clone().unwrap_or_default();
+    let redirect_uri = payload.redirect_uri.clone().unwrap_or_default();
+    let is_direct_login = client_id.is_empty();
+    
+    if !is_direct_login {
+        // 只有当 client_id 不为空时，才验证其有效性
+        let client = state
+            .config
+            .clients
+            .iter()
+            .find(|c| c.client_id == client_id);
+        if client.is_none() {
+            return (StatusCode::BAD_REQUEST, "无效的 Client ID").into_response();
+        }
+        if !client
+            .unwrap()
+            .redirect_uris
+            .iter()
+            .any(|uri| redirect_uri.starts_with(uri))
+        {
+            return (StatusCode::FORBIDDEN, "无效的重定向 URI").into_response();
+        }
     }
 
     let enc_payload = match &payload.encrypted_payload {
@@ -403,12 +423,13 @@ async fn login_handler(
         if st == 3 {
             return (
                 jar.add(create_sso_cookie(user.clone(), remember)),
-                issue_code_response(
+                handle_login_response(
                     &state,
                     user,
-                    payload.client_id,
-                    payload.redirect_uri,
-                    payload.state,
+                    client_id.clone(),
+                    redirect_uri.clone(),
+                    payload.state.clone(),
+                    is_direct_login,
                 ),
             )
                 .into_response();
@@ -420,15 +441,41 @@ async fn login_handler(
             || xuid.as_ref().unwrap().is_empty()
             || xuxm.as_ref().unwrap().is_empty()
         {
-            return perform_jincai_login_and_sync(state, jar, user, pass, remember, payload, conn)
+            return perform_jincai_login_and_sync(
+                state, jar, user, pass, remember, payload.clone(), is_direct_login, conn
+            )
                 .await;
         }
     } else {
-        return perform_jincai_login_and_sync(state, jar, user, pass, remember, payload, conn)
+        return perform_jincai_login_and_sync(
+            state, jar, user, pass, remember, payload.clone(), is_direct_login, conn
+        )
             .await;
     }
 
-    perform_jincai_login_and_sync(state, jar, user, pass, remember, payload, conn).await
+    perform_jincai_login_and_sync(state, jar, user, pass, remember, payload.clone(), is_direct_login, conn).await
+}
+
+fn handle_login_response(
+    state: &Arc<AppState>,
+    username: String,
+    client_id: String,
+    redirect_uri: String,
+    oauth_state: Option<String>,
+    is_direct_login: bool,
+) -> Response {
+    if is_direct_login {
+        // 直接登录，返回个人中心链接
+        Json(json!({ 
+            "code": "profile", 
+            "redirect_uri": "/auth/profile", 
+            "state": oauth_state,
+            "is_direct_login": true
+        })).into_response()
+    } else {
+        // OAuth流程，返回code供应用使用
+        issue_code_response(state, username, client_id, redirect_uri, oauth_state)
+    }
 }
 
 async fn perform_jincai_login_and_sync(
@@ -438,6 +485,7 @@ async fn perform_jincai_login_and_sync(
     pass: String,
     remember: bool,
     payload: LoginRequest,
+    is_direct_login: bool,
     conn: Connection,
 ) -> Response {
     let xtoken = match get_xtoken().await {
@@ -480,12 +528,13 @@ async fn perform_jincai_login_and_sync(
 
             return (
                 jar.add(create_sso_cookie(user.clone(), remember)),
-                issue_code_response(
+                handle_login_response(
                     &state,
                     user,
-                    payload.client_id,
-                    payload.redirect_uri,
-                    payload.state,
+                    payload.client_id.clone().unwrap_or_default(),
+                    payload.redirect_uri.clone().unwrap_or_default(),
+                    payload.state.clone(),
+                    is_direct_login,
                 ),
             )
                 .into_response();
@@ -499,15 +548,14 @@ fn create_sso_cookie(username: String, remember: bool) -> Cookie<'static> {
     let mut builder = Cookie::build(("sso_session", username))
         .path("/")
         .http_only(true)
-        .same_site(axum_extra::extract::cookie::SameSite::Lax); // 推荐增加 SameSite 属性
+        .same_site(axum_extra::extract::cookie::SameSite::Lax);
 
+    // 两种登录方式都使用相同的逻辑：记住我就设7天，不记住我就不设max_age（Session Cookie）
     if remember {
-        // 如果勾选记住我，设置 7 天有效期
+        // 如果勾选记住我，设置 7 天有效期（持久化 cookie）
         builder = builder.max_age(time::Duration::days(7));
-    } else {
-        builder = builder.max_age(time::Duration::seconds(1));
     }
-    // 注意：如果不设置 max_age，默认就是 Session Cookie，浏览器关闭后自动删除
+    // 如果不勾选记住我，不设置 max_age，默认就是 Session Cookie，浏览器关闭后自动删除
 
     builder.build()
 }
@@ -685,6 +733,80 @@ async fn crypto_config_handler(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+async fn profile_page_handler(jar: CookieJar) -> Response {
+    // 检查用户是否已登录
+    if jar.get("sso_session").is_none() {
+        return Redirect::to("/auth/").into_response();
+    }
+
+    match tokio::fs::read_to_string("static/profile.html").await {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "profile.html不存在").into_response(),
+    }
+}
+
+async fn profile_api_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
+    // 检查用户是否已登录
+    let username = match jar.get("sso_session") {
+        Some(c) => c.value().to_string(),
+        None => return (StatusCode::UNAUTHORIZED, "未登录").into_response(),
+    };
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "数据库错误").into_response(),
+    };
+
+    // 查询用户信息
+    let user_info: Option<(String, String, String, i32, Option<String>)> = conn
+        .query_row(
+            "SELECT id, role, external_uid, state, state_description FROM users WHERE username = ?1",
+            [&username],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()
+        .unwrap_or(None);
+
+    match user_info {
+        Some((_id, role, external_uid, state, state_description)) => {
+            // 获取用户的full_name
+            let full_name: Option<String> = conn
+                .query_row(
+                    "SELECT full_name FROM users WHERE username = ?1",
+                    [&username],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap_or(None);
+
+            Json(json!({
+                "username": username,
+                "role": role,
+                "external_uid": external_uid,
+                "full_name": full_name.unwrap_or_default(),
+                "state": state,
+                "state_description": state_description,
+            }))
+            .into_response()
+        }
+        None => {
+            // 用户不存在（不应该发生，因为有session），返回用户信息为空
+            Json(json!({
+                "username": username,
+                "role": "user",
+                "external_uid": "",
+                "full_name": "",
+                "state": 0,
+                "state_description": null,
+            }))
+            .into_response()
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let config_str = fs::read_to_string("config.json").expect("config.json 缺失");
@@ -725,6 +847,8 @@ async fn main() {
         .route("/auth/", get(login_page_handler))
         .route("/auth/continue", get(continue_handler))
         .route("/auth/logout", get(logout_handler))
+        .route("/auth/profile", get(profile_page_handler))
+        .route("/auth/profile/api", get(profile_api_handler))
         .route("/auth/token", post(token_exchange_handler))
         .route("/auth/userinfo", get(userinfo_handler))
         .route("/auth/jwks", get(jwks_handler))
