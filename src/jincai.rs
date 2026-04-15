@@ -104,31 +104,52 @@ pub async fn get_xtoken() -> Result<String, String> {
 /// - xuid或xuxm字段解析失败(返回unknown,unknown)
 pub async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String), String> {
     let client = reqwest::Client::new();
-    let url = "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCAPW1002";
-    
-    let resp = client
-        .get(url)
-        .header("User-Agent", "Mozilla/5.0")
-        .header("Cookie", format!("PZLSystemLogin={}", pzl_cookie))
-        .send()
-        .await
-        .map_err(|e| format!("User info request failed: {}", e))?;
+    let urls = [
+        "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCAPW1002",
+        "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCA2W1004",
+    ];
 
-    let text = resp.text().await.map_err(|_| "Text encoding error".to_string())?;
-    
-    let extract = |field: &str| -> Option<String> {
-        let pattern = format!("name=\"{}\"", field);
-        let pos = text.find(&pattern)?;
-        let val_mark = "value=\"";
-        let v_start = text[pos..].find(val_mark)? + pos + val_mark.len();
-        let v_end = text[v_start..].find('\"')? + v_start;
-        Some(text[v_start..v_end].to_string())
-    };
+    let mut last_text;
 
-    let xuid = extract("xuid").unwrap_or("unknown".to_string());
-    let xuxm = extract("xuxm").unwrap_or("unknown".to_string());
-    
-    Ok((xuid, xuxm))
+    for url in urls {
+        let resp = client
+            .get(url)
+            .header("User-Agent", "Mozilla/5.0")
+            .header("Cookie", format!("PZLSystemLogin={}", pzl_cookie))
+            .send()
+            .await
+            .map_err(|e| format!("User info request failed: {}", e))?;
+
+        last_text = resp.text().await.map_err(|_| "Text encoding error".to_string())?;
+
+        // 如果页面包含“无权访问”，则尝试下一个 URL
+        if last_text.contains("无权访问") {
+            continue;
+        }
+
+        // 提取逻辑
+        let extract = |text: &str, field: &str| -> Option<String> {
+            let pattern = format!("name=\"{}\"", field);
+            let pos = text.find(&pattern)?;
+            let val_mark = "value=\"";
+            let v_start = text[pos..].find(val_mark)? + pos + val_mark.len();
+            let v_end = text[v_start..].find('\"')? + v_start;
+            Some(text[v_start..v_end].to_string())
+        };
+
+        let xuid = extract(&last_text, "xuid");
+        let xuxm = extract(&last_text, "xuxm");
+
+        // 只有当成功提取到其中一个字段且不是 "unknown" 时才返回
+        if xuid.is_some() || xuxm.is_some() {
+            return Ok((
+                xuid.unwrap_or_else(|| "unknown".to_string()),
+                xuxm.unwrap_or_else(|| "unknown".to_string()),
+            ));
+        }
+    }
+
+    Ok(("unknown".to_string(), "unknown".to_string()))
 }
 
 /// 完整的进才登录流程
