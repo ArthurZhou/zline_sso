@@ -19,6 +19,7 @@
             --accent-text: #ffffff;
             --error: #e63946;
             --success: #06d6a0;
+            --warn: #f4a261;
             --muted: #666666;
             --card-bg: #f9f9f9;
         }
@@ -152,6 +153,11 @@
             color: white;
         }
 
+        .status-badge.warn {
+            background: var(--warn);
+            color: black;
+        }
+
         .loading {
             text-align: center;
             font-size: 13px;
@@ -243,6 +249,8 @@
                 let statusBadgeHtml = '<span class="status-badge">正常</span>';
                 if (data.state === 1 || data.state === 2) {
                     statusBadgeHtml = '<span class="status-badge locked">已禁用</span>';
+                } else if (data.state === 3) {
+                    statusBadgeHtml = '<span class="status-badge warn">跳过验证</span>';
                 }
 
                 const profileHtml = `
@@ -258,8 +266,8 @@
                                 <span class="info-value">${escapeHtml(data.full_name || '-')}</span>
                             </div>
                             <div class="info-row">
-                                <span class="info-label">角色</span>
-                                <span class="info-value">${escapeHtml(data.role)}</span>
+                                <span class="info-label">外部ID</span>
+                                <span class="info-value">${escapeHtml(data.external_uid || '-')}</span>
                             </div>
                         </div>
 
@@ -270,13 +278,13 @@
                                 <span>${statusBadgeHtml}</span>
                             </div>
                             <div class="info-row">
-                                <span class="info-label">外部ID</span>
-                                <span class="info-value">${escapeHtml(data.external_uid || '-')}</span>
+                                <span class="info-label">角色</span>
+                                <span class="info-value">${escapeHtml(data.role)}</span>
                             </div>
-                            ${data.state === 1 || data.state === 2 ? 
+                            ${data.state !== 0 ? 
                                 `<div class="info-row">
                                     <span class="info-label">说明</span>
-                                    <span class="info-value" style="color: var(--error);">${escapeHtml(data.state_description || '账户已禁用')}</span>
+                                    <span class="info-value" style="color: var(--error);">${escapeHtml(data.state_description || '账户状态异常')}</span>
                                 </div>` 
                                 : ''
                             }

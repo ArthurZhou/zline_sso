@@ -197,12 +197,8 @@ async fn login_handler(
     match raw_user_state.try_into().unwrap_or(UserState::Unknown) {
         UserState::Normal => {
             // 执行进才验证
-            match jincai::login_with_jincai(
-                &state.http_client,
-                user.clone(),
-                pass.to_string(),
-            )
-            .await
+            match jincai::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
+                .await
             {
                 Ok((xuid, xuxm)) => {
                     let _ = db::upsert_user(&db_conn, &user, &xuid, &xuxm);
@@ -228,29 +224,37 @@ async fn login_handler(
         }
         UserState::Restricted => {
             if is_direct_login {
-                // 允许进入个人中心
-                return (
-                    jar.add(create_sso_cookie(user.clone(), remember)),
-                    Json(json!({
-                        "code": "profile",
-                        "redirect_uri": "/auth/profile",
-                        "is_direct_login": true
-                    })),
-                )
-                    .into_response();
+                // 执行进才验证
+                match jincai::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
+                    .await
+                {
+                    Ok((xuid, xuxm)) => {
+                        let _ = db::upsert_user(&db_conn, &user, &xuid, &xuxm);
+
+                        // 允许进入个人中心
+                        return (
+                            jar.add(create_sso_cookie(user.clone(), remember)),
+                            Json(json!({
+                                "code": "profile",
+                                "redirect_uri": "/auth/profile",
+                                "is_direct_login": true
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => {
+                        return Json(json!({"error": e.to_string()})).into_response();
+                    }
+                }
             } else {
                 // 拒绝 OAuth 登录
-                return Json(
-                json!({"error": desc.unwrap_or_else(|| "账号处于限制状态,登录个人中心查看原因".to_string())}),
-            )
-            .into_response();
+                return Json(json!({"error": "账号处于限制状态,登录个人中心查看原因".to_string()}))
+                    .into_response();
             }
         }
         UserState::Locked => {
-            return Json(
-                json!({"error": desc.unwrap_or_else(|| "账号处于锁定状态,请直接联系您的管理员".to_string())}),
-            )
-            .into_response();
+            return Json(json!({"error": "账号处于锁定状态,请直接联系您的管理员".to_string()}))
+                .into_response();
         }
         UserState::BypassExternal => {
             return (
@@ -346,12 +350,12 @@ async fn continue_handler(
                 }))
                 .into_response();
             } else {
-                return Json(json!({"error": desc.unwrap_or_else(|| "账号处于限制状态,登录个人中心查看原因".to_string())}))
-                .into_response();
+                return Json(json!({"error": "账号处于限制状态,登录个人中心查看原因".to_string()}))
+                    .into_response();
             }
         }
         UserState::Locked => {
-            return Json(json!({"error": desc.unwrap_or_else(|| "账号处于锁定状态,请直接联系您的管理员".to_string())}))
+            return Json(json!({"error": "账号处于锁定状态,请直接联系您的管理员".to_string()}))
                 .into_response();
         }
         _ => {
@@ -585,7 +589,6 @@ async fn crypto_config_handler(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
-
 /// 解密前端发送的AES-GCM加密负载
 ///
 /// 前端使用共享密钥对用户名和密码进行AES-256-GCM加密，格式为：
@@ -648,7 +651,6 @@ fn decrypt_frontend_payload(
 
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
-
 
 /// 创建SSO会话Cookie
 ///
@@ -786,7 +788,10 @@ async fn main() {
         .route("/auth/token", post(token_exchange_handler))
         .route("/auth/userinfo", get(userinfo_handler))
         .route("/auth/jwks", get(jwks_handler))
-        .route("/.well-known/openid-configuration", get(oidc_config_handler))
+        .route(
+            "/.well-known/openid-configuration",
+            get(oidc_config_handler),
+        )
         .layer(GovernorLayer {
             config: governor_conf,
         })
