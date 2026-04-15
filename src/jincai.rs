@@ -101,7 +101,7 @@ pub async fn get_xtoken() -> Result<String, String> {
 /// # 可能的错误
 /// - Cookie无效或过期
 /// - 网络连接失败
-/// - xuid或xuxm字段解析失败
+/// - xuid或xuxm字段解析失败(返回unknown,unknown)
 pub async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String), String> {
     let client = reqwest::Client::new();
     let url = "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCAPW1002";
@@ -125,8 +125,8 @@ pub async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String)
         Some(text[v_start..v_end].to_string())
     };
 
-    let xuid = extract("xuid").ok_or("Failed to parse xuid")?;
-    let xuxm = extract("xuxm").ok_or("Failed to parse xuxm")?;
+    let xuid = extract("xuid").unwrap_or("unknown".to_string());
+    let xuxm = extract("xuxm").unwrap_or("unknown".to_string());
     
     Ok((xuid, xuxm))
 }
