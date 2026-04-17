@@ -1,5 +1,5 @@
 mod db;
-mod jincai;
+mod zline;
 mod statics;
 
 use aes_gcm::{
@@ -210,7 +210,7 @@ async fn login_handler(
     match raw_user_state.try_into().unwrap_or(UserState::Unknown) {
         UserState::Normal => {
             // 执行进才验证
-            match jincai::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
+            match zline::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
                 .await
             {
                 Ok((xuid, xuxm)) => {
@@ -248,7 +248,7 @@ async fn login_handler(
         UserState::Restricted => {
             if is_direct_login {
                 // 执行进才验证
-                match jincai::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
+                match zline::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
                     .await
                 {
                     Ok((xuid, xuxm)) => {

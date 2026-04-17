@@ -1,15 +1,23 @@
+//! Zline封装
+//!
+//! zlinedesk是上海市大多高中使用的校园工作台系统，理论上这里的代码适用于所有zline类系统
+//! 如果需要针对您的学校适配，只需要修改如下的代码即可
+//!
+
 use base64::{engine::general_purpose, Engine as _};
 use rsa::{RsaPublicKey, Pkcs1v15Encrypt};
 use rsa::pkcs8::DecodePublicKey;
 use std::collections::HashMap;
 use rand::thread_rng;
 
-const JINCAI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3noDWNtbDpANbjt5Iwu2NFeDwU16Ec87ToqeoIm2KI+cOs81JP9aTDk/jkAlU97mN8wZkEMDr5utAZtMVht7GLX33Wx9XjqxUsDfsGkqNL8dXJklWDu9Zh80Ui2Ug+340d5dZtKtd+nv09QZqGjdnSp9PTfFDBY133QIDAQAB";
 
-/// 使用进才公钥为数据进行RSA加密
+
+const ZLINEI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3noDWNtbDpANbjt5Iwu2NFeDwU16Ec87ToqeoIm2KI+cOs81JP9aTDk/jkAlU97mN8wZkEMDr5utAZtMVht7GLX33Wx9XjqxUsDfsGkqNL8dXJklWDu9Zh80Ui2Ug+340d5dZtKtd+nv09QZqGjdnSp9PTfFDBY133QIDAQAB";
+
+/// 使用zline公钥为数据进行RSA加密
 ///
-/// 本函数使用进才系统的公钥对字典中的每个值进行RSA加密，
-/// 用于向进才系统发送敏感数据（如用户名、密码等）。
+/// 本函数使用zline系统的公钥对字典中的每个值进行RSA加密，
+/// 用于向zline系统发送敏感数据（如用户名、密码等）。
 ///
 /// # 参数
 /// - `data`: 包含待加密数据的HashMap，key为字段名，value为待加密值
@@ -26,7 +34,7 @@ const JINCAI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3no
 /// let encrypted = encrypt_for_jincai(data);
 /// ```
 pub fn encrypt_for_jincai(data: HashMap<String, String>) -> HashMap<String, String> {
-    let pub_key_der = general_purpose::STANDARD.decode(JINCAI_PUB_KEY).unwrap_or_default();
+    let pub_key_der = general_purpose::STANDARD.decode(ZLINEI_PUB_KEY).unwrap_or_default();
     let pub_key = match RsaPublicKey::from_public_key_der(&pub_key_der) {
         Ok(k) => k,
         Err(_) => return HashMap::new(),
@@ -44,9 +52,9 @@ pub fn encrypt_for_jincai(data: HashMap<String, String>) -> HashMap<String, Stri
     out
 }
 
-/// 从进才登录页获取XToken
+/// 从zline登录页获取XToken
 ///
-/// 向进才登录页面发起请求，解析HTML响应中的XToken字段。
+/// 向zline登录页面发起请求，解析HTML响应中的XToken字段。
 /// XToken是后续登录请求的必要参数，用于防止CSRF攻击。
 ///
 /// # 返回值
@@ -83,18 +91,18 @@ pub async fn get_xtoken() -> Result<String, String> {
         .ok_or("XToken value is empty".into())
 }
 
-/// 从进才系统获取用户的外部身份信息
+/// 从zline系统获取用户的外部身份信息
 ///
-/// 使用PZLSystemLogin cookie向进才系统的用户信息获取端点发起请求，
+/// 使用PZLSystemLogin cookie向zline系统的用户信息获取端点发起请求，
 /// 解析HTML响应中的用户ID（xuid）和用户全名（xuxm）字段。
 /// 此函数应在成功登录后调用，使用登录返回的cookie。
 ///
 /// # 参数
-/// - `pzl_cookie`: 进才登录后返回的PZLSystemLogin cookie值
+/// - `pzl_cookie`: zline登录后返回的PZLSystemLogin cookie值
 ///
 /// # 返回值
 /// - `Ok((xuid, xuxm))`: 成功获取用户信息
-///   - `xuid`: 用户在进才系统中的ID
+///   - `xuid`: 用户在zline系统中的ID
 ///   - `xuxm`: 用户全名
 /// - `Err(String)`: 请求失败或解析失败，包含错误描述
 ///
@@ -152,12 +160,12 @@ pub async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String)
     Ok(("unknown".to_string(), "unknown".to_string()))
 }
 
-/// 完整的进才登录流程
+/// 完整的zline登录流程
 ///
-/// 将所有进才相关的操作整合在一个函数中：
+/// 将所有zline相关的操作整合在一个函数中：
 /// 1. 获取XToken
 /// 2. 构建加密的登录请求
-/// 3. 向进才系统发送登录请求
+/// 3. 向zline系统发送登录请求
 /// 4. 获取用户信息
 ///
 /// # 参数

@@ -209,7 +209,7 @@
                     const resp = await fetch('/auth/profile/api');
                     if (!resp.ok) {
                         // Cookie过期，清除它
-                        document.cookie = 'sso_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC;';
+                        document.cookie = 'sso_session=; path=/auth; expires=Thu, 01 Jan 1970 00:00:00 UTC;';
                     }
                 } catch (e) {
                     // 网络错误，暂不清除
