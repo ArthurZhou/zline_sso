@@ -87,11 +87,18 @@ struct AuthSession {
     client_id: String,
 }
 
+struct SessionData {
+    username: String,
+    #[allow(dead_code)]
+    created_at: std::time::SystemTime,
+}
+
 struct AppState {
     config: Config,
     http_client: reqwest::Client,
     keys: RwLock<Arc<(rsa::RsaPrivateKey, String)>>,
     code_store: Mutex<HashMap<String, AuthSession>>,
+    session_store: Mutex<HashMap<String, SessionData>>,
     db_path: String,
 }
 
@@ -121,9 +128,15 @@ impl TryFrom<i32> for UserState {
 // ============ HTTP 处理器 ============
 
 async fn logout_handler(
+    State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    // 如果有session cookie，从session_store中删除
+    if let Some(session_cookie) = jar.get("sso_session") {
+        state.session_store.lock().unwrap().remove(session_cookie.value());
+    }
+
     let query_str = serde_urlencoded::to_string(&params).unwrap_or_default(); // 保存当前url
     let remove_cookie = Cookie::build(("sso_session", ""))
         .path("/")
@@ -203,9 +216,19 @@ async fn login_handler(
                 Ok((xuid, xuxm)) => {
                     let _ = db::upsert_user(&db_conn, &user, &xuid, &xuxm);
 
+                    // 生成session ID并存储用户信息
+                    let session_id = Uuid::new_v4().to_string();
+                    state.session_store.lock().unwrap().insert(
+                        session_id.clone(),
+                        SessionData {
+                            username: user.clone(),
+                            created_at: std::time::SystemTime::now(),
+                        },
+                    );
+
                     // 验证成功，生成登录响应
                     return (
-                        jar.add(create_sso_cookie(user.clone(), remember)),
+                        jar.add(create_sso_cookie(session_id, remember)),
                         handle_login_response(
                             &state,
                             user,
@@ -231,9 +254,19 @@ async fn login_handler(
                     Ok((xuid, xuxm)) => {
                         let _ = db::upsert_user(&db_conn, &user, &xuid, &xuxm);
 
+                        // 生成session ID并存储
+                        let session_id = Uuid::new_v4().to_string();
+                        state.session_store.lock().unwrap().insert(
+                            session_id.clone(),
+                            SessionData {
+                                username: user.clone(),
+                                created_at: std::time::SystemTime::now(),
+                            },
+                        );
+
                         // 允许进入个人中心
                         return (
-                            jar.add(create_sso_cookie(user.clone(), remember)),
+                            jar.add(create_sso_cookie(session_id, remember)),
                             Json(json!({
                                 "code": "profile",
                                 "redirect_uri": "/auth/profile",
@@ -257,8 +290,17 @@ async fn login_handler(
                 .into_response();
         }
         UserState::BypassExternal => {
+            // 跳过外部验证，直接登录
+            let session_id = Uuid::new_v4().to_string();
+            state.session_store.lock().unwrap().insert(
+                session_id.clone(),
+                SessionData {
+                    username: user.clone(),
+                    created_at: std::time::SystemTime::now(),
+                },
+            );
             return (
-                jar.add(create_sso_cookie(user.clone(), remember)),
+                jar.add(create_sso_cookie(session_id, remember)),
                 handle_login_response(
                     &state,
                     user,
@@ -282,8 +324,14 @@ async fn continue_handler(
     jar: CookieJar,
     Query(payload): Query<LoginRequest>,
 ) -> Response {
-    let username = match jar.get("sso_session") {
+    let session_id = match jar.get("sso_session") {
         Some(c) => c.value().to_string(),
+        None => return Json(json!({"error": "会话已过期"})).into_response(),
+    };
+
+    // 从session_store查询用户名
+    let username = match state.session_store.lock().unwrap().get(&session_id) {
+        Some(session) => session.username.clone(),
         None => return Json(json!({"error": "会话已过期"})).into_response(),
     };
 
@@ -366,9 +414,27 @@ async fn continue_handler(
 }
 
 async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
-    let username = match jar.get("sso_session") {
+    let session_id = match jar.get("sso_session") {
         Some(c) => c.value().to_string(),
-        None => return Json(json!({"error": "未登录"})).into_response(),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "未登录"})),
+            )
+                .into_response()
+        }
+    };
+
+    // 从session_store查询用户信息
+    let username = match state.session_store.lock().unwrap().get(&session_id) {
+        Some(session) => session.username.clone(),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "会话无效或已过期"})),
+            )
+                .into_response()
+        }
     };
 
     let conn = match Connection::open(&state.db_path) {
@@ -665,9 +731,9 @@ fn decrypt_frontend_payload(
 ///
 /// # 返回值
 /// 返回构建好的Cookie，可直接用于HTTP响应
-pub fn create_sso_cookie(username: String, remember: bool) -> Cookie<'static> {
-    let mut builder = Cookie::build(("sso_session", username))
-        .path("/")
+pub fn create_sso_cookie(session_id: String, remember: bool) -> Cookie<'static> {
+    let mut builder = Cookie::build(("sso_session", session_id))
+        .path("/auth")
         .http_only(true)
         .same_site(axum_extra::extract::cookie::SameSite::Lax);
 
@@ -760,6 +826,7 @@ async fn main() {
             .unwrap(),
         keys: RwLock::new(Arc::new((private_key, kid))),
         code_store: Mutex::new(HashMap::new()),
+        session_store: Mutex::new(HashMap::new()),
         db_path,
     });
 

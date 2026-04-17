@@ -237,14 +237,35 @@
                 const response = await fetch('/auth/profile/api');
                 
                 if (!response.ok) {
-                    if (response.status === 401) {
-                        window.location.href = '/auth/';
+                    if (response.status === 401 || response.status === 403) {
+                        // 会话无效或过期，清除cookie并重定向到登录页
+                        clearSessionCookie();
+                        setTimeout(() => {
+                            window.location.href = '/auth/';
+                        }, 1000);
+                        document.getElementById('profileContent').innerHTML = 
+                            '<div class="error-message">会话已过期，正在清除登录信息并跳转到登录页...</div>';
                         return;
                     }
                     throw new Error('加载失败: ' + response.status);
                 }
 
                 const data = await response.json();
+                
+                // 检查是否有错误响应
+                if (data.error) {
+                    if (data.error.includes('会话') || data.error.includes('无效') || data.error.includes('过期')) {
+                        // 会话相关错误，清除cookie并重定向到登录
+                        clearSessionCookie();
+                        setTimeout(() => {
+                            window.location.href = '/auth/';
+                        }, 1500);
+                        document.getElementById('profileContent').innerHTML = 
+                            '<div class="error-message">' + escapeHtml(data.error) + '<br>正在清除登录信息并跳转到登录页...</div>';
+                        return;
+                    }
+                    throw new Error(data.error);
+                }
                 
                 let statusBadgeHtml = '<span class="status-badge">正常</span>';
                 if (data.state === 1 || data.state === 2) {
@@ -307,6 +328,13 @@
                 `;
                 document.getElementById('profileContent').innerHTML = errorHtml;
             }
+        }
+
+        function clearSessionCookie() {
+            // 清除sso_session cookie
+            document.cookie = 'sso_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC; HttpOnly; SameSite=Lax;';
+            // 由于HttpOnly限制，前端无法直接删除，但可以清除document.cookie会触发浏览器更新
+            // 更好的方法是让服务器在响应中设置清除cookie的指令（已由logout_handler处理）
         }
 
         function escapeHtml(text) {

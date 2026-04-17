@@ -3,17 +3,27 @@ use axum::http::StatusCode;
 
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
+use axum::extract::State;
+use std::sync::Arc;
+use crate::AppState;
 
-pub async fn login_page_handler(jar: CookieJar) -> Response {
-    // 1. 获取用户名（如果存在）
-    let username = jar.get("sso_session").map(|c| c.value().to_string());
+pub async fn login_page_handler(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+    // 检查是否有cookie，如果有，显示继续页面
+    let session_id = jar.get("sso_session").map(|c| c.value().to_string());
+    let username = if let Some(ref sid) = session_id {
+        state.session_store.lock().unwrap()
+            .get(sid)
+            .map(|s| s.username.clone())
+    } else {
+        None
+    };
 
     // 2. 开发环境下：动态读取文件，支持热更新
     #[cfg(debug_assertions)]
     {
-        if let Some(name) = username {
+        if let Some(user) = username {
             return match tokio::fs::read_to_string("static/continue.html").await {
-                Ok(html) => Html(html.replace("{{username}}", &name)).into_response(),
+                Ok(html) => Html(html.replace("{{username}}", &user)).into_response(),
                 Err(_) => (StatusCode::NOT_FOUND, "continue.html missing").into_response(),
             };
         }
@@ -30,8 +40,8 @@ pub async fn login_page_handler(jar: CookieJar) -> Response {
         static CONTINUE_HTML: &str = include_str!("../static/continue.html");
         static LOGIN_HTML: &str = include_str!("../static/login.html");
 
-        if let Some(name) = username {
-            return Html(CONTINUE_HTML.replace("{{username}}", &name)).into_response();
+        if let Some(user) = username {
+            return Html(CONTINUE_HTML.replace("{{username}}", &user)).into_response();
         }
 
         Html(LOGIN_HTML).into_response()
@@ -39,6 +49,7 @@ pub async fn login_page_handler(jar: CookieJar) -> Response {
 }
 
 pub async fn profile_page_handler(jar: CookieJar) -> Response {
+    // 检查cookie是否存在，实际验证由客户端在/auth/profile/api中程成
     if jar.get("sso_session").is_none() {
         return Redirect::to("/auth/").into_response();
     }

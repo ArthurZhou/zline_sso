@@ -201,6 +201,25 @@
     </div>
 
     <script>
+        // 页面加载时检测是否需要清除过期cookie
+        async function validateSession() {
+            const hasCookie = document.cookie.includes('sso_session');
+            if (hasCookie) {
+                try {
+                    const resp = await fetch('/auth/profile/api');
+                    if (!resp.ok) {
+                        // Cookie过期，清除它
+                        document.cookie = 'sso_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC;';
+                    }
+                } catch (e) {
+                    // 网络错误，暂不清除
+                }
+            }
+        }
+        
+        // 页面加载时验证session
+        validateSession();
+
         const loginForm = document.getElementById('loginForm');
         const submitBtn = document.getElementById('submitBtn');
         const msg = document.getElementById('msg');
@@ -234,6 +253,10 @@
                 const isDirectLogin = !clientId || clientId === "";
 
                 const configRes = await fetch('/auth/crypto-config');
+                if (!configRes.ok) {
+                    throw new Error('获取配置失败');
+                }
+                
                 const { shared_key } = await configRes.json();
 
                 const rawPayload = `${document.getElementById('username').value}|${document.getElementById('password').value}|${Math.floor(Date.now() / 1000)}`;
@@ -275,8 +298,13 @@
                     }
 
                 } else {
-                    let errStr = "错误";
-                    try { errStr = JSON.parse(resText).error || resText; } catch (e) { errStr = resText; }
+                    let errStr = "连接失败";
+                    try { 
+                        const errorData = JSON.parse(resText);
+                        errStr = errorData.error || resText; 
+                    } catch (e) { 
+                        errStr = resText || "请求失败"; 
+                    }
                     throw new Error(errStr);
                 }
             } catch (err) {
