@@ -1,6 +1,6 @@
 mod db;
-mod zline;
 mod statics;
+mod zline;
 
 use aes_gcm::{
     Aes256Gcm, Key, Nonce,
@@ -35,6 +35,7 @@ struct Config {
     issuer: String,
     rate_limit: RateLimitConfig,
     frontend_crypto: CryptoConfig,
+    account_lockout: AccountLockoutConfig,
     clients: Vec<ClientConfig>,
 }
 
@@ -47,6 +48,12 @@ struct RateLimitConfig {
 struct CryptoConfig {
     shared_key: String,
     max_clock_skew_secs: i64,
+}
+
+#[derive(Deserialize, Clone)]
+struct AccountLockoutConfig {
+    failed_attempts_threshold: i32,
+    lockout_duration_minutes: i32,
 }
 
 #[derive(Deserialize, Clone)]
@@ -64,6 +71,7 @@ struct LoginRequest {
     redirect_uri: Option<String>,
     state: Option<String>,
     remember: Option<bool>,
+    sync_info: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -134,12 +142,16 @@ async fn logout_handler(
 ) -> impl IntoResponse {
     // 如果有session cookie，从session_store中删除
     if let Some(session_cookie) = jar.get("sso_session") {
-        state.session_store.lock().unwrap().remove(session_cookie.value());
+        state
+            .session_store
+            .lock()
+            .unwrap()
+            .remove(session_cookie.value());
     }
 
     let query_str = serde_urlencoded::to_string(&params).unwrap_or_default(); // 保存当前url
     let remove_cookie = Cookie::build(("sso_session", ""))
-        .path("/")
+        .path("/auth")
         .http_only(true)
         .max_age(time::Duration::ZERO)
         .build();
@@ -158,6 +170,7 @@ async fn login_handler(
     let client_id = payload.client_id.clone().unwrap_or_default();
     let redirect_uri = payload.redirect_uri.clone().unwrap_or_default();
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
+    let mut sync_info = payload.sync_info.clone().unwrap_or_default();
 
     // 带参数，即从外部app发起验证时，验证 OAuth 参数
     if !is_direct_login {
@@ -199,22 +212,64 @@ async fn login_handler(
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
 
-    // 查询用户本地信息
+    // 查询用户本地信息（一次查询获取所有字段）
     let user = user.to_string();
-    let (raw_user_state, desc) = match db::get_user_state(&db_conn, &user) {
-        Ok(Some((state, desc))) => (state, desc),
-        Ok(None) => (0, None), // 当记录不存在数据库中时,使用默认值
+    let (raw_user_state, desc, restriction_end_time) = match db::get_user_full_info(&db_conn, &user)
+    {
+        Ok(Some(user_info)) => {
+            if user_info.id.is_empty() {
+                sync_info = true;
+            }
+            (
+                user_info.state,
+                user_info.state_description,
+                user_info.restriction_end_time,
+            )
+        }
+        Ok(None) => {
+            sync_info = true; // 第一次登录sso时同步外部数据
+            (0, None, None)
+        } // 当记录不存在数据库中时,使用默认值
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
+    let user_state = raw_user_state.try_into().unwrap_or(UserState::Unknown);
+    if (user_state == UserState::Restricted || user_state == UserState::Locked)
+        && restriction_end_time.is_some()
+    {
+        // 检查限制是否已过期
+        if let Ok(end_time) =
+            chrono::DateTime::parse_from_rfc3339(restriction_end_time.as_ref().unwrap())
+        {
+            if chrono::Utc::now() > end_time.with_timezone(&chrono::Utc) {
+                // 解除限制
+                let _ = db::set_user_restriction(&db_conn, &user, UserState::Normal as i32, "", "");
+            }
+        }
+    }
 
-    match raw_user_state.try_into().unwrap_or(UserState::Unknown) {
+    match user_state {
         UserState::Normal => {
             // 执行进才验证
-            match zline::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
-                .await
+            match zline::login_with_jincai(&state.http_client, user.clone(), pass.to_string()).await
             {
-                Ok((xuid, xuxm)) => {
-                    let _ = db::upsert_user(&db_conn, &user, &xuid, &xuxm);
+                Ok(external_cookie) => {
+                    if sync_info {
+                        // 获取外部用户信息
+                        let (xuid, xuxm, student_id, gender) =
+                            zline::get_external_user_info(&external_cookie)
+                                .await
+                                .unwrap_or((
+                                    "".to_string(),
+                                    "".to_string(),
+                                    "".to_string(),
+                                    "".to_string(),
+                                ));
+                        let _ =
+                            db::upsert_user(&db_conn, &user, &xuid, &xuxm, &student_id, &gender);
+                    }
+
+                    // 记录登录成功（更新最后登录时间，清空失败次数）
+                    let _ = db::record_login_success(&db_conn, &user);
 
                     // 生成session ID并存储用户信息
                     let session_id = Uuid::new_v4().to_string();
@@ -241,6 +296,33 @@ async fn login_handler(
                         .into_response();
                 }
                 Err(e) => {
+                    // 记录登录失败
+                    let _ = db::record_login_failure(&db_conn, &user);
+
+                    // 检查是否应该锁定账户
+                    if let Ok(Some(user_info)) = db::get_user_full_info(&db_conn, &user) {
+                        if user_info.failed_attempts
+                            >= state.config.account_lockout.failed_attempts_threshold
+                        {
+                            // 计算锁定结束时间
+                            let lockout_end = chrono::Utc::now()
+                                + chrono::Duration::minutes(
+                                    state.config.account_lockout.lockout_duration_minutes as i64,
+                                );
+                            let _ = db::set_user_restriction(
+                                &db_conn,
+                                &user,
+                                2, // UserState::Locked
+                                &format!(
+                                    "账户由于登录失败 {} 次已被锁定，将在 {} 自动解封",
+                                    user_info.failed_attempts,
+                                    lockout_end.format("%Y-%m-%d %H:%M:%S")
+                                ),
+                                &lockout_end.to_rfc3339(),
+                            );
+                        }
+                    }
+
                     return Json(json!({"error": e.to_string()})).into_response();
                 }
             }
@@ -251,8 +333,30 @@ async fn login_handler(
                 match zline::login_with_jincai(&state.http_client, user.clone(), pass.to_string())
                     .await
                 {
-                    Ok((xuid, xuxm)) => {
-                        let _ = db::upsert_user(&db_conn, &user, &xuid, &xuxm);
+                    Ok(external_cookie) => {
+                        if sync_info {
+                            // 获取外部用户信息
+                            let (xuid, xuxm, student_id, gender) =
+                                zline::get_external_user_info(&external_cookie)
+                                    .await
+                                    .unwrap_or((
+                                        "".to_string(),
+                                        "".to_string(),
+                                        "".to_string(),
+                                        "".to_string(),
+                                    ));
+                            let _ = db::upsert_user(
+                                &db_conn,
+                                &user,
+                                &xuid,
+                                &xuxm,
+                                &student_id,
+                                &gender,
+                            );
+                        }
+
+                        // 记录登录成功（更新最后登录时间，清空失败次数）
+                        let _ = db::record_login_success(&db_conn, &user);
 
                         // 生成session ID并存储
                         let session_id = Uuid::new_v4().to_string();
@@ -276,6 +380,34 @@ async fn login_handler(
                             .into_response();
                     }
                     Err(e) => {
+                        // 记录登录失败
+                        let _ = db::record_login_failure(&db_conn, &user);
+
+                        // 检查是否应该锁定账户
+                        if let Ok(Some(user_info)) = db::get_user_full_info(&db_conn, &user) {
+                            if user_info.failed_attempts
+                                >= state.config.account_lockout.failed_attempts_threshold
+                            {
+                                // 计算锁定结束时间
+                                let lockout_end = chrono::Utc::now()
+                                    + chrono::Duration::minutes(
+                                        state.config.account_lockout.lockout_duration_minutes
+                                            as i64,
+                                    );
+                                let _ = db::set_user_restriction(
+                                    &db_conn,
+                                    &user,
+                                    2, // UserState::Locked
+                                    &format!(
+                                        "账户由于登录失败 {} 次已被锁定，将在 {} 自动解封",
+                                        user_info.failed_attempts,
+                                        lockout_end.format("%Y-%m-%d %H:%M:%S")
+                                    ),
+                                    &lockout_end.to_rfc3339(),
+                                );
+                            }
+                        }
+
                         return Json(json!({"error": e.to_string()})).into_response();
                     }
                 }
@@ -286,7 +418,7 @@ async fn login_handler(
             }
         }
         UserState::Locked => {
-            return Json(json!({"error": "账号处于锁定状态,请直接联系您的管理员".to_string()}))
+            return Json(json!({"error": "账号处于锁定状态,请直接联系您的管理员。附加信息：".to_string() + &desc.unwrap_or_else(|| "无".to_string())}))
                 .into_response();
         }
         UserState::BypassExternal => {
@@ -361,13 +493,34 @@ async fn continue_handler(
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
 
-    let (raw_user_state, desc) = match db::get_user_state(&db_conn, &username) {
-        Ok(Some((state, desc))) => (state, desc),
-        Ok(None) => (0, None),
-        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
-    };
+    let (raw_user_state, desc, restriction_end_time) =
+        match db::get_user_full_info(&db_conn, &username) {
+            Ok(Some(user_info)) => (
+                user_info.state,
+                user_info.state_description,
+                user_info.restriction_end_time,
+            ),
+            Ok(None) => (0, None, None),
+            Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+        };
 
-    match raw_user_state.try_into().unwrap_or(UserState::Unknown) {
+    let user_state = raw_user_state.try_into().unwrap_or(UserState::Unknown);
+    if (user_state == UserState::Restricted || user_state == UserState::Locked)
+        && restriction_end_time.is_some()
+    {
+        // 检查限制是否已过期
+        if let Ok(end_time) =
+            chrono::DateTime::parse_from_rfc3339(restriction_end_time.as_ref().unwrap())
+        {
+            if chrono::Utc::now() > end_time.with_timezone(&chrono::Utc) {
+                // 解除限制
+                let _ =
+                    db::set_user_restriction(&db_conn, &username, UserState::Normal as i32, "", "");
+            }
+        }
+    }
+
+    match user_state {
         UserState::Normal | UserState::BypassExternal => {
             if !is_direct_login {
                 return handle_login_response(
@@ -403,8 +556,10 @@ async fn continue_handler(
             }
         }
         UserState::Locked => {
-            return Json(json!({"error": "账号处于锁定状态,请直接联系您的管理员".to_string()}))
-                .into_response();
+            return Json(
+                json!({"error": "账号处于锁定状态,请直接联系您的管理员。附加信息：".to_string() + &desc.unwrap_or_else(|| "无".to_string())}),
+            )
+            .into_response();
         }
         _ => {
             return Json(json!({"error": desc.unwrap_or_else(|| "内部错误".to_string())}))
@@ -421,7 +576,7 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
                 axum::http::StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "未登录"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -433,7 +588,7 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
                 axum::http::StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "会话无效或已过期"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -442,23 +597,19 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
 
-    match db::get_user_info(&conn, &username) {
-        Ok(Some((_, role, external_uid, state, state_description))) => {
-            let full_name = match db::get_user_full_name(&conn, &username) {
-                Ok(name) => name.unwrap_or_default(),
-                Err(_) => String::new(),
-            };
-
-            Json(json!({
-                "username": username,
-                "role": role,
-                "external_uid": external_uid,
-                "full_name": full_name,
-                "state": state,
-                "state_description": state_description,
-            }))
-            .into_response()
-        }
+    match db::get_user_full_info(&conn, &username) {
+        Ok(Some(user_info)) => Json(json!({
+            "username": username,
+            "role": user_info.role,
+            "external_uid": user_info.external_uid,
+            "student_id": user_info.student_id,
+            "full_name": user_info.full_name,
+            "gender": user_info.gender,
+            "last_login_time": user_info.last_login_time,
+            "state": user_info.state,
+            "state_description": user_info.state_description,
+        }))
+        .into_response(),
         Ok(None) => Json(json!({
             "username": username,
             "role": "user",
@@ -577,10 +728,23 @@ async fn userinfo_handler(
                 Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
             };
 
-            let (role, xuid, xuxm) = match db::get_user_oauth_info(&conn, username) {
-                Ok(Some((r, x, f))) => (r, x, f),
-                _ => ("user".to_string(), String::new(), String::new()),
-            };
+            let (role, xuid, xuxm, student_id, gender) =
+                match db::get_user_full_info(&conn, username) {
+                    Ok(Some(user_info)) => (
+                        user_info.role,
+                        user_info.external_uid,
+                        user_info.full_name,
+                        user_info.student_id.unwrap_or(String::new()),
+                        user_info.gender.unwrap_or(String::new()),
+                    ),
+                    _ => (
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ),
+                };
 
             let mut resp_data = json!({
                 "sub": username,
@@ -596,10 +760,10 @@ async fn userinfo_handler(
             {
                 for field in &client_conf.return_extra_userinfo {
                     match field.as_str() {
-                        "name" => resp_data["name"] = json!(xuxm),
-                        "stuid" => resp_data["stuid"] = json!(xuid),
                         "external_uid" => resp_data["external_uid"] = json!(xuid),
                         "full_name" => resp_data["full_name"] = json!(xuxm),
+                        "student_id" => resp_data["student_id"] = json!(student_id),
+                        "gender" => resp_data["gender"] = json!(gender),
                         _ => {}
                     }
                 }

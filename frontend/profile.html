@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
@@ -78,10 +79,8 @@
             align-items: center;
         }
 
-        .btn-logout {
+        .btn {
             padding: 8px 16px;
-            background: var(--error);
-            color: var(--accent-text);
             border: 2px solid var(--border);
             font-family: inherit;
             font-size: 12px;
@@ -91,7 +90,19 @@
             transition: opacity 0.2s;
         }
 
-        .btn-logout:hover {
+        .btn-logout {
+            background: var(--error);
+            color: var(--accent-text);
+        }
+
+        .btn-action {
+            background: var(--accent);
+            color: var(--accent-text);
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        .btn:hover {
             opacity: 0.8;
         }
 
@@ -126,6 +137,19 @@
             font-size: 13px;
         }
 
+        .sync-section {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px dashed var(--border);
+        }
+
+        .sync-note {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 8px;
+            line-height: 1.4;
+        }
+
         .info-label {
             font-weight: 700;
             color: var(--muted);
@@ -158,20 +182,23 @@
             color: black;
         }
 
-        .loading {
+        .hidden {
+            display: none;
+        }
+
+        .loading,
+        .error-container {
             text-align: center;
-            font-size: 13px;
-            color: var(--muted);
-            padding: 20px;
+            padding: 40px;
         }
 
         .error-message {
             color: var(--error);
             font-weight: 700;
-            margin-bottom: 20px;
             padding: 15px;
             background: var(--card-bg);
             border-left: 4px solid var(--error);
+            text-align: left;
         }
 
         .footer {
@@ -188,20 +215,13 @@
         }
 
         @media (max-width: 600px) {
-            .container {
-                padding: 15px;
-            }
-
             .header {
                 flex-direction: column;
                 gap: 15px;
                 align-items: flex-start;
             }
 
-            .header-right {
-                width: 100%;
-            }
-
+            .header-right,
             .btn-logout {
                 width: 100%;
             }
@@ -212,148 +232,174 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
             <h1>个人中心</h1>
             <div class="header-right">
-                <button class="btn-logout" id="logoutBtn">登出</button>
+                <button class="btn btn-logout" id="logoutBtn">登出</button>
             </div>
         </div>
 
-        <div id="errorContainer"></div>
+        <div id="statusView" class="loading">加载中...</div>
 
-        <div id="profileContent" class="loading">加载中...</div>
+        <div id="profileContent" class="profile-grid hidden">
+            <div class="card">
+                <h2>基本信息</h2>
+                <div class="info-row">
+                    <span class="info-label">用户名</span>
+                    <span id="val-username" class="info-value">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">全名</span>
+                    <span id="val-fullname" class="info-value">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">外部ID</span>
+                    <span id="val-extid" class="info-value">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">学号</span>
+                    <span id="val-student-id" class="info-value">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">性别</span>
+                    <span id="val-gender" class="info-value">-</span>
+                </div>
+                <div class="sync-section">
+                    <button class="btn btn-action" id="syncBtn">同步外部信息</button>
+                    <p class="sync-note">
+                        如果您发现本卡片中的信息未及时更新，请尝试此操作。
+                        <br />
+                        这将会退出登录当前帐号并要求您重新登录，登录完成后您的信息就会更新。
+                    </p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>账户状态</h2>
+                <div class="info-row">
+                    <span class="info-label">状态</span>
+                    <span id="val-status">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">角色</span>
+                    <span id="val-role" class="info-value">-</span>
+                </div>
+                <div id="desc-row" class="info-row hidden">
+                    <span class="info-label">说明</span>
+                    <span id="val-desc" class="info-value" style="color: var(--error);">-</span>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div class="footer">
-        © 2026 校园工作台 SSO | 
+        © 2026 校园工作台 SSO |
         <a href="/auth/agreement">用户协议与隐私政策</a>
     </div>
 
     <script>
+        const statusView = document.getElementById('statusView');
+        const profileContent = document.getElementById('profileContent');
+
         async function loadProfile() {
             try {
                 const response = await fetch('/auth/profile/api');
-                
+
                 if (!response.ok) {
                     if (response.status === 401 || response.status === 403) {
-                        // 会话无效或过期，清除cookie并重定向到登录页
-                        clearSessionCookie();
-                        setTimeout(() => {
-                            window.location.href = '/auth/';
-                        }, 1000);
-                        document.getElementById('profileContent').innerHTML = 
-                            '<div class="error-message">会话已过期，正在清除登录信息并跳转到登录页...</div>';
+                        handleSessionError('会话已过期，正在重定向到登录页...');
                         return;
                     }
                     throw new Error('加载失败: ' + response.status);
                 }
 
                 const data = await response.json();
-                
-                // 检查是否有错误响应
                 if (data.error) {
-                    if (data.error.includes('会话') || data.error.includes('无效') || data.error.includes('过期')) {
-                        // 会话相关错误，清除cookie并重定向到登录
-                        clearSessionCookie();
-                        setTimeout(() => {
-                            window.location.href = '/auth/';
-                        }, 1500);
-                        document.getElementById('profileContent').innerHTML = 
-                            '<div class="error-message">' + escapeHtml(data.error) + '<br>正在清除登录信息并跳转到登录页...</div>';
+                    if (/会话|无效|过期/.test(data.error)) {
+                        handleSessionError(data.error);
                         return;
                     }
                     throw new Error(data.error);
                 }
-                
-                let statusBadgeHtml = '<span class="status-badge">正常</span>';
-                if (data.state === 1 || data.state === 2) {
-                    statusBadgeHtml = '<span class="status-badge locked">已禁用</span>';
-                } else if (data.state === 3) {
-                    statusBadgeHtml = '<span class="status-badge warn">跳过验证</span>';
-                }
 
-                const profileHtml = `
-                    <div class="profile-grid">
-                        <div class="card">
-                            <h2>基本信息</h2>
-                            <div class="info-row">
-                                <span class="info-label">用户名</span>
-                                <span class="info-value">${escapeHtml(data.username)}</span>
-                            </div>
-                            <div class="info-row">
-                                <span class="info-label">全名</span>
-                                <span class="info-value">${escapeHtml(data.full_name || '-')}</span>
-                            </div>
-                            <div class="info-row">
-                                <span class="info-label">外部ID</span>
-                                <span class="info-value">${escapeHtml(data.external_uid || '-')}</span>
-                            </div>
-                        </div>
-
-                        <div class="card">
-                            <h2>账户状态</h2>
-                            <div class="info-row">
-                                <span class="info-label">状态</span>
-                                <span>${statusBadgeHtml}</span>
-                            </div>
-                            <div class="info-row">
-                                <span class="info-label">角色</span>
-                                <span class="info-value">${escapeHtml(data.role)}</span>
-                            </div>
-                            ${data.state !== 0 ? 
-                                `<div class="info-row">
-                                    <span class="info-label">说明</span>
-                                    <span class="info-value" style="color: var(--error);">${escapeHtml(data.state_description || '账户状态异常')}</span>
-                                </div>` 
-                                : ''
-                            }
-                        </div>
-                    </div>
-                `;
-
-                document.getElementById('profileContent').innerHTML = profileHtml;
-
+                renderProfile(data);
             } catch (error) {
                 console.error('加载失败:', error);
-                const errorHtml = `
-                    <div class="error-message">
-                        >> ${escapeHtml(error.message)}
-                    </div>
-                    <div class="loading">
-                        <p>无法加载个人信息</p>
-                        <button class="btn-logout" onclick="location.reload()">重试</button>
-                    </div>
+                statusView.innerHTML = `
+                    <div class="error-message">>> ${escapeHtml(error.message)}</div>
+                    <button class="btn btn-logout" style="margin-top:20px" onclick="location.reload()">重试</button>
                 `;
-                document.getElementById('profileContent').innerHTML = errorHtml;
             }
         }
 
+        function renderProfile(data) {
+            // 填充文本
+            document.getElementById('val-username').textContent = data.username;
+            document.getElementById('val-fullname').textContent = data.full_name || '-';
+            document.getElementById('val-student-id').textContent = data.student_id || '-';
+            document.getElementById('val-gender').textContent = data.gender || '-';
+            document.getElementById('val-extid').textContent = data.external_uid || '-';
+            document.getElementById('val-role').textContent = data.role;
+
+            // 状态标签逻辑
+            const statusEl = document.getElementById('val-status');
+            if (data.state === 1 || data.state === 2) {
+                statusEl.className = 'status-badge locked';
+                statusEl.textContent = '已禁用';
+            } else if (data.state === 3) {
+                statusEl.className = 'status-badge warn';
+                statusEl.textContent = '跳过验证';
+            } else {
+                statusEl.className = 'status-badge';
+                statusEl.textContent = '正常';
+            }
+
+            // 异常说明显示
+            if (data.state !== 0) {
+                document.getElementById('desc-row').classList.remove('hidden');
+                document.getElementById('val-desc').textContent = data.state_description || '账户状态异常';
+            }
+
+            // 切换视图
+            statusView.classList.add('hidden');
+            profileContent.classList.remove('hidden');
+        }
+
+        function handleSessionError(msg) {
+            clearSessionCookie();
+            statusView.innerHTML = `<div class="error-message">${escapeHtml(msg)}</div>`;
+            setTimeout(() => { window.location.href = '/auth/'; }, 1500);
+        }
+
         function clearSessionCookie() {
-            // 清除sso_session cookie
-            document.cookie = 'sso_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC; HttpOnly; SameSite=Lax;';
-            // 由于HttpOnly限制，前端无法直接删除，但可以清除document.cookie会触发浏览器更新
-            // 更好的方法是让服务器在响应中设置清除cookie的指令（已由logout_handler处理）
+            document.cookie = 'sso_session=; path=/auth; expires=Thu, 01 Jan 1970 00:00:00 UTC; HttpOnly; SameSite=Lax;';
         }
 
         function escapeHtml(text) {
-            const map = {
-                '&': '&amp;',
-                '<': '&lt;',
-                '>': '&gt;',
-                '"': '&quot;',
-                "'": '&#039;'
-            };
-            return text.replace(/[&<>"']/g, m => map[m]);
+            const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+            return String(text).replace(/[&<>"']/g, m => map[m]);
         }
 
+        // 登出
         document.getElementById('logoutBtn').addEventListener('click', () => {
+            clearSessionCookie();
             window.location.href = '/auth/logout';
         });
 
-        // 页面加载时获取个人信息
+        // 同步外部信息
+        document.getElementById('syncBtn').addEventListener('click', async (e) => {
+            const response = await fetch('/auth/logout', {
+                method: 'GET',
+            });
+            clearSessionCookie();
+            window.location.href = "/auth/?sync_info=1";
+        });
+
         loadProfile();
     </script>
 </body>
+
 </html>

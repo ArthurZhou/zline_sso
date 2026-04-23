@@ -22,13 +22,13 @@ pub async fn login_page_handler(State(state): State<Arc<AppState>>, jar: CookieJ
     #[cfg(debug_assertions)]
     {
         if let Some(user) = username {
-            return match tokio::fs::read_to_string("static/continue.html").await {
+            return match tokio::fs::read_to_string("frontend/continue.html").await {
                 Ok(html) => Html(html.replace("{{username}}", &user)).into_response(),
                 Err(_) => (StatusCode::NOT_FOUND, "continue.html missing").into_response(),
             };
         }
 
-        match tokio::fs::read_to_string("static/login.html").await {
+        match tokio::fs::read_to_string("frontend/login.html").await {
             Ok(html) => Html(html).into_response(),
             Err(_) => (StatusCode::NOT_FOUND, "login.html missing").into_response(),
         }
@@ -57,7 +57,7 @@ pub async fn profile_page_handler(jar: CookieJar) -> Response {
     #[cfg(debug_assertions)]
     {
         // 开发模式：实时读取文件，方便调试
-        match tokio::fs::read_to_string("static/profile.html").await {
+        match tokio::fs::read_to_string("frontend/profile.html").await {
             Ok(html) => Html(html).into_response(),
             Err(_) => (StatusCode::NOT_FOUND, "File not found").into_response(),
         }
@@ -74,7 +74,7 @@ pub async fn profile_page_handler(jar: CookieJar) -> Response {
 pub async fn agreement_html_handler() -> Response {
     #[cfg(debug_assertions)]
     {
-        tokio::fs::read_to_string("static/agreement.html")
+        tokio::fs::read_to_string("frontend/agreement.html")
             .await
             .map(Html)
             .map_err(|_| (StatusCode::NOT_FOUND, "agreement.html not found"))
@@ -91,7 +91,7 @@ pub async fn agreement_html_handler() -> Response {
 pub async fn agreement_md_handler() -> Response {
     #[cfg(debug_assertions)]
     {
-        tokio::fs::read_to_string("static/AGREEMENT.md")
+        tokio::fs::read_to_string("frontend/AGREEMENT.md")
             .await
             .map(|content| {
                 (

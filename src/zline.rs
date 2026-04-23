@@ -4,15 +4,15 @@
 //! 如果需要针对您的学校适配，只需要修改如下的代码即可
 //!
 
-use base64::{engine::general_purpose, Engine as _};
-use rsa::{RsaPublicKey, Pkcs1v15Encrypt};
-use rsa::pkcs8::DecodePublicKey;
-use std::collections::HashMap;
+use base64::{Engine as _, engine::general_purpose};
 use rand::thread_rng;
-
-
+use rsa::pkcs8::DecodePublicKey;
+use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+use std::collections::HashMap;
+use std::fs;
 
 const ZLINEI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3noDWNtbDpANbjt5Iwu2NFeDwU16Ec87ToqeoIm2KI+cOs81JP9aTDk/jkAlU97mN8wZkEMDr5utAZtMVht7GLX33Wx9XjqxUsDfsGkqNL8dXJklWDu9Zh80Ui2Ug+340d5dZtKtd+nv09QZqGjdnSp9PTfFDBY133QIDAQAB";
+const STUDENTS_DATA_CSV: &str = "students_data.csv";
 
 /// 使用zline公钥为数据进行RSA加密
 ///
@@ -34,21 +34,23 @@ const ZLINEI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3no
 /// let encrypted = encrypt_for_jincai(data);
 /// ```
 pub fn encrypt_for_jincai(data: HashMap<String, String>) -> HashMap<String, String> {
-    let pub_key_der = general_purpose::STANDARD.decode(ZLINEI_PUB_KEY).unwrap_or_default();
+    let pub_key_der = general_purpose::STANDARD
+        .decode(ZLINEI_PUB_KEY)
+        .unwrap_or_default();
     let pub_key = match RsaPublicKey::from_public_key_der(&pub_key_der) {
         Ok(k) => k,
         Err(_) => return HashMap::new(),
     };
-    
+
     let mut out = HashMap::new();
     let mut rng = thread_rng();
-    
+
     for (k, v) in data {
         if let Ok(enc) = pub_key.encrypt(&mut rng, Pkcs1v15Encrypt, v.as_bytes()) {
             out.insert(k, general_purpose::STANDARD.encode(enc));
         }
     }
-    
+
     out
 }
 
@@ -79,7 +81,9 @@ pub async fn get_xtoken() -> Result<String, String> {
         .await
         .map_err(|_| "Failed to read response".to_string())?;
 
-    let id_pos = text.find("id=\"XToken\"").ok_or("XToken element not found")?;
+    let id_pos = text
+        .find("id=\"XToken\"")
+        .ok_or("XToken element not found")?;
     let start = text[..id_pos].rfind('<').ok_or("Tag parse error")?;
     let end = text[id_pos..].find('>').ok_or("Tag closure missing")? + id_pos;
     let tag = &text[start..=end];
@@ -89,6 +93,43 @@ pub async fn get_xtoken() -> Result<String, String> {
         .and_then(|v| v.split('\"').next())
         .map(|v| v.to_string())
         .ok_or("XToken value is empty".into())
+}
+
+/// 从CSV文件查询用户信息
+///
+/// 从指定的CSV文件中根据电脑号(xuid)查找记录编号(student_id)和性别。
+/// CSV结构: 记录编号,电脑号,学号,姓名,性别
+///
+/// # 参数
+/// - `file_path`: CSV文件路径
+/// - `target_xuid`: 待查找的电脑号(xuid)
+///
+/// # 返回值
+/// - `Some((student_id, gender))`: 找到匹配项
+/// - `None`: 未找到匹配项或文件读取失败
+fn find_user_in_csv_file(file_path: &str, target_xuid: &str) -> Option<(String, String)> {
+    let csv_data = fs::read_to_string(file_path).ok()?;
+
+    for line in csv_data.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let columns: Vec<&str> = line.split(',').collect();
+
+        // CSV字段映射索引:
+        // 0: 记录编号 (作为返回的学号)
+        // 1: 电脑号 (xuid)
+        // 4: 性别
+        if columns.len() >= 5 && columns[1].trim() == target_xuid {
+            let record_id = columns[0].trim().to_string();
+            let gender = columns[4].trim().to_string();
+            return Some((record_id, gender));
+        }
+    }
+
+    None
 }
 
 /// 从zline系统获取用户的外部身份信息
@@ -110,7 +151,9 @@ pub async fn get_xtoken() -> Result<String, String> {
 /// - Cookie无效或过期
 /// - 网络连接失败
 /// - xuid或xuxm字段解析失败(返回unknown,unknown)
-pub async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String), String> {
+pub async fn get_external_user_info(
+    pzl_cookie: &str,
+) -> Result<(String, String, String, String), String> {
     let client = reqwest::Client::new();
     let urls = [
         "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCAPW1002",
@@ -128,7 +171,10 @@ pub async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String)
             .await
             .map_err(|e| format!("User info request failed: {}", e))?;
 
-        last_text = resp.text().await.map_err(|_| "Text encoding error".to_string())?;
+        last_text = resp
+            .text()
+            .await
+            .map_err(|_| "Text encoding error".to_string())?;
 
         // 如果页面包含“无权访问”，则尝试下一个 URL
         if last_text.contains("无权访问") {
@@ -150,14 +196,23 @@ pub async fn get_external_user_info(pzl_cookie: &str) -> Result<(String, String)
 
         // 只有当成功提取到其中一个字段且不是 "unknown" 时才返回
         if xuid.is_some() || xuxm.is_some() {
-            return Ok((
-                xuid.unwrap_or_else(|| "unknown".to_string()),
-                xuxm.unwrap_or_else(|| "unknown".to_string()),
-            ));
+            let xuid_val = xuid.unwrap_or_else(|| "".to_string());
+            let xuxm_val = xuxm.unwrap_or_else(|| "".to_string());
+
+            // 从CSV中查询学号和性别
+            let (student_id, gender) = find_user_in_csv_file(STUDENTS_DATA_CSV, &xuid_val)
+                .unwrap_or(("".to_string(), "".to_string()));
+
+            return Ok((xuid_val, xuxm_val, student_id, gender));
         }
     }
 
-    Ok(("unknown".to_string(), "unknown".to_string()))
+    Ok((
+        "".to_string(),
+        "".to_string(),
+        "".to_string(),
+        "".to_string(),
+    ))
 }
 
 /// 完整的zline登录流程
@@ -180,7 +235,7 @@ pub async fn login_with_jincai(
     http_client: &reqwest::Client,
     username: String,
     password: String,
-) -> Result<(String, String), String> {
+) -> Result<String, String> {
     // 步骤1: 获取XToken
     let xtoken = get_xtoken().await?;
 
@@ -209,10 +264,7 @@ pub async fn login_with_jincai(
     }
 
     // 步骤5: 验证登录响应并提取错误信息
-    let body = resp
-        .json::<serde_json::Value>()
-        .await
-        .unwrap_or_default();
+    let body = resp.json::<serde_json::Value>().await.unwrap_or_default();
 
     if body["succeed"] != "1" {
         let error_msg = body
@@ -222,6 +274,5 @@ pub async fn login_with_jincai(
         return Err(error_msg.to_string());
     }
 
-    // 步骤6: 获取用户信息
-    get_external_user_info(&pzl_cookie).await
+    Ok(pzl_cookie)
 }

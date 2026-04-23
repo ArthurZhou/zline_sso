@@ -248,6 +248,7 @@
                 const clientId = urlParams.get('client_id') || "";
                 const redirectUri = urlParams.get('redirect_uri') || "";
                 const oauthState = urlParams.get('state') || "";
+                const syncInfo = urlParams.get('sync_info')==="1" || urlParams.get('sync_info')==="true" || false;
 
                 // 如果没有client_id，则为直接登录模式（无OAuth）
                 const isDirectLogin = !clientId || clientId === "";
@@ -270,7 +271,8 @@
                         remember: document.getElementById('rememberMe').checked,
                         client_id: clientId,
                         redirect_uri: redirectUri,
-                        state: oauthState
+                        state: oauthState,
+                        sync_info: syncInfo
                     })
                 });
 

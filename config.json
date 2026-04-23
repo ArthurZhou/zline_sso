@@ -9,6 +9,10 @@
     "rate_limit": {
         "per_second": 20
     },
+    "account_lockout": {
+        "failed_attempts_threshold": 5,
+        "lockout_duration_minutes": 30
+    },
     "clients": [
         {
             "client_id": "test_client",
@@ -16,7 +20,12 @@
             "redirect_uris": [
                 "http://127.0.0.1:8080/callback"
             ],
-            "return_extra_userinfo": [ "stuid" ]
+            "return_extra_userinfo": [
+                "external_uid",
+                "full_name",
+                "student_id",
+                "gender"
+            ]
         }
     ]
 }

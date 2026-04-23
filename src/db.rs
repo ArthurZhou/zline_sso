@@ -1,9 +1,27 @@
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
+/// 用户信息结构体
+#[derive(Debug, Clone)]
+pub struct UserInfo {
+    pub id: String,
+    pub username: String,
+    pub role: String,
+    pub external_uid: String,
+    pub full_name: String,
+    pub student_id: Option<String>,
+    pub gender: Option<String>,
+    pub state: i32,
+    pub state_description: Option<String>,
+    pub restriction_end_time: Option<String>,
+    pub last_login_time: Option<String>,
+    pub failed_attempts: i32,
+}
+
 /// 初始化数据库
 ///
 /// 创建 users 表（如果不存在）。该表存储用户的基本信息和状态。
+/// 开启 WAL 模式以优化高并发下的读写性能。
 ///
 /// # 参数
 /// - `path`: 数据库文件路径
@@ -13,15 +31,29 @@ use uuid::Uuid;
 /// - `Err(rusqlite::Error)`: 数据库操作失败
 pub fn init_db(path: &str) -> Result<(), rusqlite::Error> {
     let conn = Connection::open(path)?;
+
+    #[cfg(not(debug_assertions))]
+    {
+        // 性能优化：开启 WAL 模式
+        conn.pragma_update(None, "journal_mode", &"WAL")?;
+        // 性能优化：设置同步模式为 NORMAL
+        conn.pragma_update(None, "synchronous", &"NORMAL")?;
+    }
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             external_uid TEXT,
             full_name TEXT,
+            student_id TEXT,
+            gender TEXT,
             role TEXT DEFAULT 'user',
             state INTEGER DEFAULT 0,
             state_description TEXT,
+            restriction_end_time TEXT,
+            last_login_time TEXT,
+            failed_attempts INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );",
@@ -30,96 +62,41 @@ pub fn init_db(path: &str) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// 根据用户名获取用户状态信息
+/// 获取用户的完整信息（一次查询获取所有字段）
 ///
-/// 从数据库中查询指定用户名的用户状态和状态描述。
-///
-/// # 参数
-/// - `conn`: 数据库连接
-/// - `username`: 用户名
-///
-/// # 返回值
-/// - `Ok(Some((state, description)))`: 用户存在，返回状态码和描述文本
-///   - `state`: 用户状态码（0=Normal, 1=Restricted, 2=Locked, 3=BypassExternal）
-///   - `description`: 状态描述（可能为None）
-/// - `Ok(None)`: 用户不存在
-/// - `Err(rusqlite::Error)`: 数据库查询失败
-pub fn get_user_state(conn: &Connection, username: &str) -> Result<Option<(i32, Option<String>)>, rusqlite::Error> {
-    conn.query_row(
-        "SELECT state, state_description FROM users WHERE username = ?1",
-        [username],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-}
-
-/// 根据用户名获取用户完整信息
-///
-/// 从数据库查询用户的ID、角色、外部UID、状态和状态描述。
+/// 从数据库查询用户的所有信息，包括ID、用户名、角色、外部UID、全名、学号、性别、状态、
+/// 状态描述、限制结束时间、最后登录时间和登录失败次数。
+/// 这是一个统一的查询入口，避免多次数据库查询。
 ///
 /// # 参数
 /// - `conn`: 数据库连接
 /// - `username`: 用户名
 ///
 /// # 返回值
-/// - `Ok(Some((id, role, external_uid, state, description)))`: 用户存在
-///   - `id`: 用户的唯一标识符（UUID）
-///   - `role`: 用户角色（如'user'、'admin'等）
-///   - `external_uid`: 进才系统中的用户ID
-///   - `state`: 用户状态码
-///   - `description`: 状态描述
+/// - `Ok(Some(user_info))`: 用户存在，返回用户完整信息
 /// - `Ok(None)`: 用户不存在
 /// - `Err(rusqlite::Error)`: 数据库查询失败
-pub fn get_user_info(conn: &Connection, username: &str) -> Result<Option<(String, String, String, i32, Option<String>)>, rusqlite::Error> {
+pub fn get_user_full_info(
+    conn: &Connection,
+    username: &str,
+) -> Result<Option<UserInfo>, rusqlite::Error> {
     conn.query_row(
-        "SELECT id, role, external_uid, state, state_description FROM users WHERE username = ?1",
+        "SELECT id, username, role, external_uid, full_name, student_id, gender, state, state_description, restriction_end_time, last_login_time, failed_attempts FROM users WHERE username = ?1",
         [username],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-    )
-    .optional()
-}
-
-/// 获取用户的OAuth相关信息
-///
-/// 从数据库查询用户的角色、外部UID和全名，用于生成OAuth token和userinfo响应。
-///
-/// # 参数
-/// - `conn`: 数据库连接
-/// - `username`: 用户名
-///
-/// # 返回值
-/// - `Ok(Some((role, external_uid, full_name)))`: 用户存在
-///   - `role`: 用户角色
-///   - `external_uid`: 进才系统中的用户ID
-///   - `full_name`: 用户全名
-/// - `Ok(None)`: 用户不存在
-/// - `Err(rusqlite::Error)`: 数据库查询失败
-pub fn get_user_oauth_info(conn: &Connection, username: &str) -> Result<Option<(String, String, String)>, rusqlite::Error> {
-    conn.query_row(
-        "SELECT role, external_uid, full_name FROM users WHERE username = ?1",
-        [username],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )
-    .optional()
-}
-
-/// 获取用户的全名
-///
-/// 从数据库查询指定用户的全名。
-///
-/// # 参数
-/// - `conn`: 数据库连接
-/// - `username`: 用户名
-///
-/// # 返回值
-/// - `Ok(Some(full_name))`: 用户存在，返回其全名
-/// - `Ok(None)`: 用户不存在
-/// - `Err(rusqlite::Error)`: 数据库查询失败
-pub fn get_user_full_name(conn: &Connection, username: &str) -> Result<Option<String>, rusqlite::Error> {
-    conn.query_row(
-        "SELECT full_name FROM users WHERE username = ?1",
-        [username],
-        |row| row.get(0),
+        |row| Ok(UserInfo {
+            id: row.get(0)?,
+            username: row.get(1)?,
+            role: row.get(2)?,
+            external_uid: row.get(3)?,
+            full_name: row.get(4)?,
+            student_id: row.get(5)?,
+            gender: row.get(6)?,
+            state: row.get(7)?,
+            state_description: row.get(8)?,
+            restriction_end_time: row.get(9)?,
+            last_login_time: row.get(10)?,
+            failed_attempts: row.get(11)?,
+        }),
     )
     .optional()
 }
@@ -127,13 +104,15 @@ pub fn get_user_full_name(conn: &Connection, username: &str) -> Result<Option<St
 /// 插入新用户或更新现有用户信息
 ///
 /// 使用INSERT OR REPLACE语义，如果用户（基于username唯一键）不存在则插入新记录，
-/// 否则更新其外部UID、全名和更新时间。用户的初始状态为Normal (0)，角色为'user'。
+/// 否则更新其外部UID、全名、学号、性别和更新时间。用户的初始状态为Normal (0)，角色为'user'。
 ///
 /// # 参数
 /// - `conn`: 数据库连接
 /// - `username`: 用户名（唯一标识）
 /// - `external_uid`: 进才系统中的用户ID
 /// - `full_name`: 用户全名
+/// - `student_id`: 学号 (格式如 240339)
+/// - `gender`: 性别
 ///
 /// # 返回值
 /// - `Ok(())`: 操作成功
@@ -143,12 +122,85 @@ pub fn upsert_user(
     username: &str,
     external_uid: &str,
     full_name: &str,
+    student_id: &str,
+    gender: &str,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO users (id, username, external_uid, full_name, role, state) 
-         VALUES (?1, ?2, ?3, ?4, 'user', 0)
-         ON CONFLICT(username) DO UPDATE SET external_uid=?3, full_name=?4, updated_at=CURRENT_TIMESTAMP",
-        rusqlite::params![Uuid::new_v4().to_string(), username, external_uid, full_name],
+        "INSERT INTO users (id, username, external_uid, full_name, student_id, gender, role, state, failed_attempts) 
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'user', 0, 0)
+         ON CONFLICT(username) DO UPDATE SET 
+            external_uid=?3, 
+            full_name=?4, 
+            student_id=?5, 
+            gender=?6, 
+            updated_at=CURRENT_TIMESTAMP",
+        rusqlite::params![Uuid::new_v4().to_string(), username, external_uid, full_name, student_id, gender],
+    )?;
+    Ok(())
+}
+
+/// 记录登录成功
+///
+/// 更新用户的最后登录时间，并清空失败次数。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `username`: 用户名
+///
+/// # 返回值
+/// - `Ok(())`: 操作成功
+/// - `Err(rusqlite::Error)`: 数据库操作失败
+pub fn record_login_success(conn: &Connection, username: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE users SET last_login_time=CURRENT_TIMESTAMP, failed_attempts=0, updated_at=CURRENT_TIMESTAMP WHERE username=?1",
+        [username],
+    )?;
+    Ok(())
+}
+
+/// 记录登录失败
+///
+/// 增加用户的连续登录失败次数。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `username`: 用户名
+///
+/// # 返回值
+/// - `Ok(())`: 操作成功
+/// - `Err(rusqlite::Error)`: 数据库操作失败
+pub fn record_login_failure(conn: &Connection, username: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE users SET failed_attempts=failed_attempts+1, updated_at=CURRENT_TIMESTAMP WHERE username=?1",
+        [username],
+    )?;
+    Ok(())
+}
+
+/// 设置用户限制状态及结束时间
+///
+/// 更新用户的状态、状态描述和限制结束时间。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `username`: 用户名
+/// - `state`: 新状态码
+/// - `description`: 状态描述
+/// - `end_time`: 限制结束时间（ISO8601格式，如 "2024-12-31T23:59:59"）
+///
+/// # 返回值
+/// - `Ok(())`: 操作成功
+/// - `Err(rusqlite::Error)`: 数据库操作失败
+pub fn set_user_restriction(
+    conn: &Connection,
+    username: &str,
+    state: i32,
+    description: &str,
+    end_time: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE users SET state=?1, state_description=?2, restriction_end_time=?3, updated_at=CURRENT_TIMESTAMP WHERE username=?4",
+        rusqlite::params![state, description, end_time.to_string(), username],
     )?;
     Ok(())
 }
