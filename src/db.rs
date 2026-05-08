@@ -1,5 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
+pub type DbPool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
+pub type DbConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
 /// 用户信息结构体
 #[derive(Debug, Clone)]
@@ -53,12 +55,34 @@ pub fn init_db(path: &str) -> Result<(), rusqlite::Error> {
             state_description TEXT,
             restriction_end_time TEXT,
             last_login_time TEXT,
-            failed_attempts INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            failed_attempts INTEGER DEFAULT 0
         );",
         [],
     )?;
+
+    // 登录记录表
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS login_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            ip_address TEXT,
+            success INTEGER NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+        );",
+        [],
+    )?;
+
+    // 创建索引以加快查询
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_login_logs_username ON login_logs(username);",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_login_logs_timestamp ON login_logs(timestamp);",
+        [],
+    );
+
     Ok(())
 }
 
@@ -77,7 +101,7 @@ pub fn init_db(path: &str) -> Result<(), rusqlite::Error> {
 /// - `Ok(None)`: 用户不存在
 /// - `Err(rusqlite::Error)`: 数据库查询失败
 pub fn get_user_full_info(
-    conn: &Connection,
+    conn: &DbConn,
     username: &str,
 ) -> Result<Option<UserInfo>, rusqlite::Error> {
     conn.query_row(
@@ -118,7 +142,7 @@ pub fn get_user_full_info(
 /// - `Ok(())`: 操作成功
 /// - `Err(rusqlite::Error)`: 数据库操作失败
 pub fn upsert_user(
-    conn: &Connection,
+    conn: &DbConn,
     username: &str,
     external_uid: &str,
     full_name: &str,
@@ -132,8 +156,7 @@ pub fn upsert_user(
             external_uid=?3, 
             full_name=?4, 
             student_id=?5, 
-            gender=?6, 
-            updated_at=CURRENT_TIMESTAMP",
+            gender=?6",
         rusqlite::params![Uuid::new_v4().to_string(), username, external_uid, full_name, student_id, gender],
     )?;
     Ok(())
@@ -150,9 +173,9 @@ pub fn upsert_user(
 /// # 返回值
 /// - `Ok(())`: 操作成功
 /// - `Err(rusqlite::Error)`: 数据库操作失败
-pub fn record_login_success(conn: &Connection, username: &str) -> Result<(), rusqlite::Error> {
+pub fn record_login_success(conn: &DbConn, username: &str) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "UPDATE users SET last_login_time=CURRENT_TIMESTAMP, failed_attempts=0, updated_at=CURRENT_TIMESTAMP WHERE username=?1",
+        "UPDATE users SET last_login_time=CURRENT_TIMESTAMP, failed_attempts=0 WHERE username=?1",
         [username],
     )?;
     Ok(())
@@ -169,9 +192,9 @@ pub fn record_login_success(conn: &Connection, username: &str) -> Result<(), rus
 /// # 返回值
 /// - `Ok(())`: 操作成功
 /// - `Err(rusqlite::Error)`: 数据库操作失败
-pub fn record_login_failure(conn: &Connection, username: &str) -> Result<(), rusqlite::Error> {
+pub fn record_login_failure(conn: &DbConn, username: &str) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "UPDATE users SET failed_attempts=failed_attempts+1, updated_at=CURRENT_TIMESTAMP WHERE username=?1",
+        "UPDATE users SET failed_attempts=failed_attempts+1 WHERE username=?1",
         [username],
     )?;
     Ok(())
@@ -192,15 +215,41 @@ pub fn record_login_failure(conn: &Connection, username: &str) -> Result<(), rus
 /// - `Ok(())`: 操作成功
 /// - `Err(rusqlite::Error)`: 数据库操作失败
 pub fn set_user_restriction(
-    conn: &Connection,
+    conn: &DbConn,
     username: &str,
     state: i32,
     description: &str,
     end_time: &str,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "UPDATE users SET state=?1, state_description=?2, restriction_end_time=?3, updated_at=CURRENT_TIMESTAMP WHERE username=?4",
+        "UPDATE users SET state=?1, state_description=?2, restriction_end_time=?3 WHERE username=?4",
         rusqlite::params![state, description, end_time.to_string(), username],
+    )?;
+    Ok(())
+}
+
+/// 记录登录尝试（成功或失败）
+///
+/// 向 login_logs 表插入一条记录，记录用户的登录尝试及结果。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `username`: 用户名
+/// - `ip_address`: 客户端 IP 地址（支持 nginx X-Forwarded-For）
+/// - `success`: 登录是否成功（1 为成功，0 为失败）
+///
+/// # 返回值
+/// - `Ok(())`: 日志记录成功
+/// - `Err(rusqlite::Error)`: 数据库操作失败
+pub fn log_login_attempt(
+    conn: &DbConn,
+    username: &str,
+    ip_address: &str,
+    success: i32,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO login_logs (username, ip_address, success) VALUES (?1, ?2, ?3)",
+        rusqlite::params![username, ip_address, success],
     )?;
     Ok(())
 }

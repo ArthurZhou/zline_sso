@@ -10,6 +10,8 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
 use std::collections::HashMap;
 use std::fs;
+use once_cell::sync::Lazy;
+use std::sync::RwLock;
 
 const ZLINEI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3noDWNtbDpANbjt5Iwu2NFeDwU16Ec87ToqeoIm2KI+cOs81JP9aTDk/jkAlU97mN8wZkEMDr5utAZtMVht7GLX33Wx9XjqxUsDfsGkqNL8dXJklWDu9Zh80Ui2Ug+340d5dZtKtd+nv09QZqGjdnSp9PTfFDBY133QIDAQAB";
 const STUDENTS_DATA_CSV: &str = "students_data.csv";
@@ -107,29 +109,39 @@ pub async fn get_xtoken() -> Result<String, String> {
 /// # 返回值
 /// - `Some((student_id, gender))`: 找到匹配项
 /// - `None`: 未找到匹配项或文件读取失败
-fn find_user_in_csv_file(file_path: &str, target_xuid: &str) -> Option<(String, String)> {
-    let csv_data = fs::read_to_string(file_path).ok()?;
+// 全局CSV缓存：键为 xuid -> (student_id, gender)
+static CSV_CACHE: Lazy<RwLock<HashMap<String, (String, String)>>> = Lazy::new(|| {
+    RwLock::new(HashMap::new())
+});
+
+/// 从CSV文件加载到内存缓存。建议在程序启动时调用一次。
+pub fn load_csv_cache(file_path: &str) -> Result<(), std::io::Error> {
+    let csv_data = fs::read_to_string(file_path)?;
+    let mut map = HashMap::new();
 
     for line in csv_data.lines().skip(1) {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-
         let columns: Vec<&str> = line.split(',').collect();
-
-        // CSV字段映射索引:
-        // 0: 记录编号 (作为返回的学号)
-        // 1: 电脑号 (xuid)
-        // 4: 性别
-        if columns.len() >= 5 && columns[1].trim() == target_xuid {
+        if columns.len() >= 5 {
+            let xuid = columns[1].trim().to_string();
             let record_id = columns[0].trim().to_string();
             let gender = columns[4].trim().to_string();
-            return Some((record_id, gender));
+            map.insert(xuid, (record_id, gender));
         }
     }
 
-    None
+    let mut guard = CSV_CACHE.write().unwrap();
+    *guard = map;
+    Ok(())
+}
+
+/// 从内存缓存中查询用户信息
+fn find_user_in_csv_file(_file_path: &str, target_xuid: &str) -> Option<(String, String)> {
+    let guard = CSV_CACHE.read().unwrap();
+    guard.get(target_xuid).cloned()
 }
 
 /// 从zline系统获取用户的外部身份信息

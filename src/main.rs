@@ -8,7 +8,7 @@ use aes_gcm::{
 };
 use axum::{
     Form, Router,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     response::{IntoResponse, Json, Redirect, Response},
     routing::{get, post},
 };
@@ -16,7 +16,6 @@ use axum_extra::extract::cookie::{Cookie, CookieJar};
 use base64::Engine;
 use base64::engine::general_purpose;
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -107,7 +106,7 @@ struct AppState {
     keys: RwLock<Arc<(rsa::RsaPrivateKey, String)>>,
     code_store: Mutex<HashMap<String, AuthSession>>,
     session_store: Mutex<HashMap<String, SessionData>>,
-    db_path: String,
+    db_pool: db::DbPool,
 }
 
 #[derive(PartialEq)]
@@ -131,6 +130,34 @@ impl TryFrom<i32> for UserState {
             _ => Ok(UserState::Locked), // 默认其他状态为 Locked，禁止登录
         }
     }
+}
+
+// ============ HTTP 处理器 ============
+
+/// 从请求头中提取客户端 IP 地址
+/// 优先级：X-Forwarded-For -> X-Real-IP -> 连接地址
+fn extract_client_ip(headers: &axum::http::HeaderMap, socket_addr: Option<std::net::SocketAddr>) -> String {
+    // 检查 X-Forwarded-For 头（nginx 转发）
+    if let Some(forwarded_header) = headers.get("x-forwarded-for") {
+        if let Ok(forwarded) = forwarded_header.to_str() {
+            // X-Forwarded-For 可能包含多个 IP，取第一个（原始客户端 IP）
+            if let Some(ip) = forwarded.split(',').next() {
+                return ip.trim().to_string();
+            }
+        }
+    }
+
+    // 检查 X-Real-IP 头（某些 nginx 配置）
+    if let Some(real_ip_header) = headers.get("x-real-ip") {
+        if let Ok(real_ip) = real_ip_header.to_str() {
+            return real_ip.to_string();
+        }
+    }
+
+    // 使用直接连接地址
+    socket_addr
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 // ============ HTTP 处理器 ============
@@ -164,9 +191,13 @@ async fn logout_handler(
 
 async fn login_handler(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     jar: CookieJar,
     Json(payload): Json<LoginRequest>,
 ) -> Response {
+    // 提取客户端 IP 地址
+    let client_ip = extract_client_ip(&headers, Some(socket_addr));
     let client_id = payload.client_id.clone().unwrap_or_default();
     let redirect_uri = payload.redirect_uri.clone().unwrap_or_default();
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
@@ -207,7 +238,7 @@ async fn login_handler(
     };
     // 记住登录状态的选项
     let remember = payload.remember.unwrap_or(false);
-    let db_conn = match Connection::open(&state.db_path) {
+    let db_conn = match state.db_pool.get() {
         Ok(c) => c,
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
@@ -271,6 +302,9 @@ async fn login_handler(
                     // 记录登录成功（更新最后登录时间，清空失败次数）
                     let _ = db::record_login_success(&db_conn, &user);
 
+                    // 记录成功登录到审计日志
+                    let _ = db::log_login_attempt(&db_conn, &user, &client_ip, 1);
+
                     // 生成session ID并存储用户信息
                     let session_id = Uuid::new_v4().to_string();
                     state.session_store.lock().unwrap().insert(
@@ -298,6 +332,9 @@ async fn login_handler(
                 Err(e) => {
                     // 记录登录失败
                     let _ = db::record_login_failure(&db_conn, &user);
+
+                    // 记录失败登录到审计日志
+                    let _ = db::log_login_attempt(&db_conn, &user, &client_ip, 0);
 
                     // 检查是否应该锁定账户
                     if let Ok(Some(user_info)) = db::get_user_full_info(&db_conn, &user) {
@@ -358,6 +395,9 @@ async fn login_handler(
                         // 记录登录成功（更新最后登录时间，清空失败次数）
                         let _ = db::record_login_success(&db_conn, &user);
 
+                        // 记录成功登录到审计日志
+                        let _ = db::log_login_attempt(&db_conn, &user, &client_ip, 1);
+
                         // 生成session ID并存储
                         let session_id = Uuid::new_v4().to_string();
                         state.session_store.lock().unwrap().insert(
@@ -382,6 +422,9 @@ async fn login_handler(
                     Err(e) => {
                         // 记录登录失败
                         let _ = db::record_login_failure(&db_conn, &user);
+
+                        // 记录失败登录到审计日志
+                        let _ = db::log_login_attempt(&db_conn, &user, &client_ip, 0);
 
                         // 检查是否应该锁定账户
                         if let Ok(Some(user_info)) = db::get_user_full_info(&db_conn, &user) {
@@ -453,9 +496,13 @@ async fn login_handler(
 
 async fn continue_handler(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     jar: CookieJar,
     Query(payload): Query<LoginRequest>,
 ) -> Response {
+    // 提取客户端 IP 地址
+    let _client_ip = extract_client_ip(&headers, Some(socket_addr));
     let session_id = match jar.get("sso_session") {
         Some(c) => c.value().to_string(),
         None => return Json(json!({"error": "会话已过期"})).into_response(),
@@ -488,7 +535,7 @@ async fn continue_handler(
         }
     }
 
-    let db_conn = match Connection::open(&state.db_path) {
+    let db_conn = match state.db_pool.get() {
         Ok(c) => c,
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
@@ -592,7 +639,7 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
         }
     };
 
-    let conn = match Connection::open(&state.db_path) {
+    let conn = match state.db_pool.get() {
         Ok(c) => c,
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
@@ -723,7 +770,7 @@ async fn userinfo_handler(
             let username = &token_data.claims.sub;
             let client_id = &token_data.claims.aud;
 
-            let conn = match Connection::open(&state.db_path) {
+            let conn = match state.db_pool.get() {
                 Ok(c) => c,
                 Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
             };
@@ -978,6 +1025,10 @@ async fn main() {
     let db_path = "users.db".to_string();
     db::init_db(&db_path).expect("Failed to init database");
 
+    // 创建数据库连接池
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path);
+    let db_pool = r2d2::Pool::new(manager).expect("Failed to create database pool");
+
     let mut rng = rand::thread_rng();
     let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("Failed to generate RSA key");
     let kid = Uuid::new_v4().to_string();
@@ -991,8 +1042,13 @@ async fn main() {
         keys: RwLock::new(Arc::new((private_key, kid))),
         code_store: Mutex::new(HashMap::new()),
         session_store: Mutex::new(HashMap::new()),
-        db_path,
+        db_pool,
     });
+
+    // 预加载 students CSV 到内存缓存，避免每次查询都打开/读取文件
+    if let Err(e) = zline::load_csv_cache("students_data.csv") {
+        eprintln!("Warning: failed to load students_data.csv: {}", e);
+    }
 
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
