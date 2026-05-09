@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{UserFlag, UserState};
@@ -21,6 +22,13 @@ pub struct UserInfo {
     pub restriction_end_time: Option<String>,
     pub last_login_time: Option<String>,
     pub failed_attempts: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoginAttempt {
+    pub success: bool,
+    pub ip_address: Option<String>,
+    pub timestamp: String,
 }
 
 /// 初始化数据库
@@ -281,4 +289,27 @@ fn log_login_attempt(
         rusqlite::params![uid, ip_address, success],
     )?;
     Ok(())
+}
+
+pub fn get_recent_login_attempts(
+    conn: &DbConn,
+    uid: &str,
+    limit: i32,
+) -> Result<Vec<LoginAttempt>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT success, ip_address, timestamp FROM login_logs WHERE uid = ?1 ORDER BY timestamp DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![uid, limit], |row| {
+        Ok(LoginAttempt {
+            success: row.get::<_, i32>(0)? == 1,
+            ip_address: row.get(1)?,
+            timestamp: row.get(2)?,
+        })
+    })?;
+
+    let mut attempts = Vec::new();
+    for attempt in rows {
+        attempts.push(attempt?);
+    }
+    Ok(attempts)
 }

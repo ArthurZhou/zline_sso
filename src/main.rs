@@ -262,8 +262,13 @@ async fn login_handler(
         Ok(Some(info)) => info,
         Ok(None) => {
             new_user_record = true;
-            db::upsert_user(&db_conn, &user, "", "", "", "").ok();
-            db::get_user_full_info(&db_conn, &user).unwrap().unwrap()
+            if let Err(_) = db::upsert_user(&db_conn, &user, "", "", "", "") {
+                return Json(json!({"error": "内部错误"})).into_response();
+            }
+            match db::get_user_full_info(&db_conn, &user) {
+                Ok(Some(info)) => info,
+                _ => return Json(json!({"error": "内部错误"})).into_response(),
+            }
         }
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
@@ -338,7 +343,7 @@ async fn login_handler(
                     db::record_login_failure(&db_conn, &user_info.uid, &client_ip).ok();
 
                     // 检查是否应该锁定账户
-                    if user_info.failed_attempts
+                    if user_info.failed_attempts + 1
                         >= state.config.account_lockout.failed_attempts_threshold
                     {
                         // 计算锁定结束时间
@@ -352,7 +357,7 @@ async fn login_handler(
                             UserState::Locked,
                             &format!(
                                 "账户由于登录失败 {} 次已被锁定，将在 {} 自动解封",
-                                user_info.failed_attempts,
+                                user_info.failed_attempts + 1,
                                 lockout_end.format("%Y-%m-%d %H:%M:%S")
                             ),
                             &lockout_end.to_rfc3339(),
@@ -412,7 +417,7 @@ async fn login_handler(
                         db::record_login_failure(&db_conn, &user_info.uid, &client_ip).ok();
 
                         // 检查是否应该锁定账户
-                        if user_info.failed_attempts
+                        if user_info.failed_attempts + 1
                             >= state.config.account_lockout.failed_attempts_threshold
                         {
                             // 计算锁定结束时间
@@ -468,9 +473,6 @@ async fn login_handler(
                 ),
             )
                 .into_response();
-        }
-        _ => {
-            return Json(json!({"error": user_info.state_description.unwrap_or_else(|| "内部错误".to_string())})).into_response();
         }
     }
 }
@@ -578,10 +580,6 @@ async fn continue_handler(
             )
             .into_response();
         }
-        _ => {
-            return Json(json!({"error": user_info.state_description.unwrap_or_else(|| "内部错误".to_string())}))
-                .into_response();
-        }
     }
 }
 
@@ -615,18 +613,25 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
     };
 
     match db::get_user_full_info(&conn, &username) {
-        Ok(Some(user_info)) => Json(json!({
-            "username": username,
-            "role": user_info.role,
-            "external_uid": user_info.external_uid,
-            "student_id": user_info.student_id,
-            "full_name": user_info.full_name,
-            "gender": user_info.gender,
-            "last_login_time": user_info.last_login_time,
-            "state": user_info.state,
-            "state_description": user_info.state_description,
-        }))
-        .into_response(),
+        Ok(Some(user_info)) => {
+            let login_attempts =
+                db::get_recent_login_attempts(&conn, &user_info.uid, 3).unwrap_or_default();
+            Json(json!({
+                "username": user_info.username,
+                "role": user_info.role,
+                "external_uid": user_info.external_uid,
+                "student_id": user_info.student_id,
+                "full_name": user_info.full_name,
+                "gender": user_info.gender,
+                "last_login_time": user_info.last_login_time,
+                "state": user_info.state,
+                "state_description": user_info.state_description,
+                "restriction_end_time": user_info.restriction_end_time,
+                "flag": user_info.flag,
+                "login_attempts": login_attempts,
+            }))
+            .into_response()
+        }
         Ok(None) => Json(json!({
             "username": username,
             "role": "user",
@@ -634,6 +639,8 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
             "full_name": "",
             "state": 0,
             "state_description": null,
+            "flag": 0,
+            "login_attempts": [],
         }))
         .into_response(),
         Err(_) => Json(json!({
@@ -643,6 +650,8 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
             "full_name": "",
             "state": 0,
             "state_description": null,
+            "flag": 0,
+            "login_attempts": [],
         }))
         .into_response(),
     }
