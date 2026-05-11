@@ -444,8 +444,8 @@
 
                 // 拼接地理信息
                 let geoInfo;
-                if (attempt.country=="unknown" && attempt.region=="unknown") {
-                    geoInfo = "局域网";
+                if (attempt.region === attempt.country) {
+                    geoInfo = attempt.country;
                 } else {
                     geoInfo = [attempt.country, attempt.region].filter(Boolean).join(',');
                 }

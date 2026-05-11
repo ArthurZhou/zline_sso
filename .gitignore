@@ -3,4 +3,4 @@
 /frontend/node_modules
 /static
 /students_data.csv
-ipinfo.mmdb
+GeoLite2-City.mmdb

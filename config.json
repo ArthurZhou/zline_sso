@@ -9,7 +9,7 @@
     "rate_limit": {
         "per_second": 20
     },
-    "geoip_mmdb_path": "./ipinfo.mmdb",
+    "geoip_mmdb_path": "GeoLite2-City.mmdb",
     "account_lockout": {
         "failed_attempts_threshold": 5,
         "lockout_duration_minutes": 30

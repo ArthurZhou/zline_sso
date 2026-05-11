@@ -23,7 +23,7 @@ use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
-use maxminddb::{geoip2::City, Reader};
+use maxminddb::Reader;
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -121,10 +121,10 @@ struct AppState {
 
 impl AppState {
     fn lookup_geo_location(&self, ip: &str) -> GeoLocation {
-        if ip == "unknown" {
+        if ip == "-1" {
             return GeoLocation {
-                country: "unknown".to_string(),
-                region: "unknown".to_string(),
+                country: "未知".to_string(),
+                region: "未知".to_string(),
             };
         }
 
@@ -141,47 +141,78 @@ impl AppState {
     }
 
     fn resolve_geo_location(&self, ip: &str) -> GeoLocation {
-        let default = GeoLocation {
-            country: "unknown".to_string(),
-            region: "unknown".to_string(),
-        };
+    let default_unknown = GeoLocation {
+        country: "未知".to_string(),
+        region: "未知".to_string(),
+    };
 
-        let reader = match self.geoip_reader.as_ref() {
-            Some(reader) => reader,
-            None => return default,
-        };
+    let lan_location = GeoLocation {
+        country: "局域网".to_string(),
+        region: "局域网".to_string(),
+    };
 
-        let ip_addr: IpAddr = match ip.parse() {
-            Ok(ip_addr) => ip_addr,
-            Err(_) => return default,
-        };
+    // 1. 解析 IP 字符串
+    let ip_addr: IpAddr = match ip.parse() {
+        Ok(addr) => addr,
+        Err(_) => return default_unknown,
+    };
 
-        let city: City = match reader.lookup(ip_addr) {
-            Ok(city) => city,
-            Err(_) => return default,
-        };
-
-        let country = city
-            .country
-            .and_then(|country| country.names.and_then(|names| names.get("en").map(|s| s.to_string())))
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let region = city
-            .subdivisions
-            .and_then(|subs| {
-                subs.first().and_then(|sub| {
-                    sub.names.as_ref().and_then(|names| names.get("en").map(|s| s.to_string()))
-                })
-            })
-            .or_else(|| {
-                city.city.and_then(|city| {
-                    city.names.and_then(|names| names.get("en").map(|s| s.to_string()))
-                })
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-
-        GeoLocation { country, region }
+    // 2. 识别内网/私有地址
+    if AppState::is_lan(ip_addr) {
+        return lan_location;
     }
+
+    // 3. 检查 Reader 是否可用
+    let reader = match self.geoip_reader.as_ref() {
+        Some(reader) => reader,
+        None => return default_unknown,
+    };
+
+    // 4. 查询 MMDB
+    let data: serde_json::Value = match reader.lookup(ip_addr) {
+        Ok(d) => d,
+        Err(_) => return default_unknown,
+    };
+
+    // 5. 提取国家 (优先中文)
+    let country = data.get("country")
+        .and_then(|c| c.get("names"))
+        .or_else(|| data.get("registered_country").and_then(|rc| rc.get("names")))
+        .and_then(|n| n.get("zh-CN").or(n.get("en")))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "未知".to_string());
+
+    // 6. 提取地区 (优先中文)
+    let region = data.get("subdivisions")
+        .and_then(|s| s.as_array())
+        .and_then(|a| a.first())
+        .and_then(|f| f.get("names"))
+        .or_else(|| data.get("city").and_then(|c| c.get("names")))
+        .and_then(|n| n.get("zh-CN").or(n.get("en")))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "未知".to_string());
+
+    GeoLocation { country, region }
+}
+
+/// 辅助函数：判断 IP 是否属于局域网或保留地址
+fn is_lan(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || // 127.0.0.1
+            v4.is_private() ||  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+            v4.is_link_local()  // 169.254.0.0/16
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || // ::1
+            // 检查是否为唯一本地地址 (fc00::/7) 或 链路本地地址 (fe80::/10)
+            (v6.segments()[0] & 0xfe00) == 0xfc00 || 
+            (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
 }
 
 #[derive(PartialEq, Default)]
@@ -257,7 +288,7 @@ fn extract_client_ip(
     }
 
     // 使用直接连接地址
-    socket_addr.map(|addr| addr.ip().to_string()).unwrap_or_else(|| "unknown".to_string())
+    socket_addr.map(|addr| addr.ip().to_string()).unwrap_or_else(|| "-1".to_string())
 }
 
 // ============ HTTP 处理器 ============
