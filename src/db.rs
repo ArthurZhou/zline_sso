@@ -28,6 +28,8 @@ pub struct UserInfo {
 pub struct LoginAttempt {
     pub success: bool,
     pub ip_address: Option<String>,
+    pub country: Option<String>,
+    pub region: Option<String>,
     pub timestamp: String,
 }
 
@@ -80,12 +82,35 @@ pub fn init_db(path: &str) -> Result<(), rusqlite::Error> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             uid TEXT NOT NULL,
             ip_address TEXT,
+            country TEXT,
+            region TEXT,
             success INTEGER NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(uid) REFERENCES users(uid) ON DELETE CASCADE
         );",
         [],
     )?;
+
+    // 如果旧表缺少 geo 字段，按需补齐
+    let mut stmt = conn.prepare("PRAGMA table_info(login_logs);")?;
+    let mut rows = stmt.query([])?;
+    let mut has_country = false;
+    let mut has_region = false;
+    while let Some(row) = rows.next()? {
+        let column_name: String = row.get(1)?;
+        if column_name == "country" {
+            has_country = true;
+        }
+        if column_name == "region" {
+            has_region = true;
+        }
+    }
+    if !has_country {
+        let _ = conn.execute("ALTER TABLE login_logs ADD COLUMN country TEXT;", []);
+    }
+    if !has_region {
+        let _ = conn.execute("ALTER TABLE login_logs ADD COLUMN region TEXT;", []);
+    }
 
     // 创建索引以加快查询
     let _ = conn.execute(
@@ -185,13 +210,19 @@ pub fn upsert_user(
 /// # 返回值
 /// - `Ok(())`: 操作成功
 /// - `Err(rusqlite::Error)`: 数据库操作失败
-pub fn record_login_success(conn: &DbConn, uid: &str, ip: &str) -> Result<(), rusqlite::Error> {
+pub fn record_login_success(
+    conn: &DbConn,
+    uid: &str,
+    ip: &str,
+    country: &str,
+    region: &str,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE users SET last_login_time=CURRENT_TIMESTAMP, failed_attempts=0 WHERE uid=?1",
         [uid],
     )?;
     // 记录到审计日志
-    log_login_attempt(&conn, &uid, &ip, 1).ok();
+    log_login_attempt(&conn, &uid, ip, country, region, 1).ok();
     Ok(())
 }
 
@@ -207,13 +238,19 @@ pub fn record_login_success(conn: &DbConn, uid: &str, ip: &str) -> Result<(), ru
 /// # 返回值
 /// - `Ok(())`: 操作成功
 /// - `Err(rusqlite::Error)`: 数据库操作失败
-pub fn record_login_failure(conn: &DbConn, uid: &str, ip: &str) -> Result<(), rusqlite::Error> {
+pub fn record_login_failure(
+    conn: &DbConn,
+    uid: &str,
+    ip: &str,
+    country: &str,
+    region: &str,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE users SET failed_attempts=failed_attempts+1 WHERE uid=?1",
         [uid],
     )?;
     // 记录到审计日志
-    log_login_attempt(&conn, &uid, &ip, 0).ok();
+    log_login_attempt(&conn, &uid, ip, country, region, 0).ok();
     Ok(())
 }
 
@@ -282,13 +319,29 @@ fn log_login_attempt(
     conn: &DbConn,
     uid: &str,
     ip_address: &str,
+    country: &str,
+    region: &str,
     success: i32,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO login_logs (uid, ip_address, success) VALUES (?1, ?2, ?3)",
-        rusqlite::params![uid, ip_address, success],
+        "INSERT INTO login_logs (uid, ip_address, country, region, success) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![uid, ip_address, country, region, success],
     )?;
     Ok(())
+}
+
+fn mask_ip(ip: String) -> String {
+    if ip.contains(':') {
+        // 处理 IPv6: 取第一组，后面补星号
+        // 例如 2001:0db8:85a3... -> 2001:**
+        ip.split(':').next().unwrap_or("").to_string() + ":**"
+    } else if ip.contains('.') {
+        // 处理 IPv4: 取第一段，后面补星号
+        // 例如 192.168.1.1 -> 192.**
+        ip.split('.').next().unwrap_or("").to_string() + ".**"
+    } else {
+        "***".to_string() // 异常格式
+    }
 }
 
 pub fn get_recent_login_attempts(
@@ -297,13 +350,16 @@ pub fn get_recent_login_attempts(
     limit: i32,
 ) -> Result<Vec<LoginAttempt>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT success, ip_address, timestamp FROM login_logs WHERE uid = ?1 ORDER BY timestamp DESC LIMIT ?2",
+        "SELECT success, ip_address, country, region, timestamp FROM login_logs WHERE uid = ?1 ORDER BY timestamp DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![uid, limit], |row| {
+        let raw_ip = row.get(1).unwrap_or_default(); // 先拿到原始 IP
         Ok(LoginAttempt {
             success: row.get::<_, i32>(0)? == 1,
-            ip_address: row.get(1)?,
-            timestamp: row.get(2)?,
+            ip_address: Some(mask_ip(raw_ip)), // 调用脱敏函数
+            country: row.get(2)?,
+            region: row.get(3)?,
+            timestamp: row.get(4)?,
         })
     })?;
 

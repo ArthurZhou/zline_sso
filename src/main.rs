@@ -20,9 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
+use maxminddb::{geoip2::City, Reader};
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -33,6 +34,7 @@ struct Config {
     port: u16,
     issuer: String,
     rate_limit: RateLimitConfig,
+    geoip_mmdb_path: String,
     frontend_crypto: CryptoConfig,
     account_lockout: AccountLockoutConfig,
     clients: Vec<ClientConfig>,
@@ -100,6 +102,12 @@ struct SessionData {
     created_at: std::time::SystemTime,
 }
 
+#[derive(Debug, Clone)]
+struct GeoLocation {
+    country: String,
+    region: String,
+}
+
 struct AppState {
     config: Config,
     http_client: reqwest::Client,
@@ -107,6 +115,73 @@ struct AppState {
     code_store: Mutex<HashMap<String, AuthSession>>,
     session_store: Mutex<HashMap<String, SessionData>>,
     db_pool: db::DbPool,
+    geoip_reader: Option<Arc<Reader<Vec<u8>>>>,
+    geoip_cache: Mutex<HashMap<String, GeoLocation>>,
+}
+
+impl AppState {
+    fn lookup_geo_location(&self, ip: &str) -> GeoLocation {
+        if ip == "unknown" {
+            return GeoLocation {
+                country: "unknown".to_string(),
+                region: "unknown".to_string(),
+            };
+        }
+
+        if let Some(location) = self.geoip_cache.lock().unwrap().get(ip) {
+            return location.clone();
+        }
+
+        let location = self.resolve_geo_location(ip);
+        self.geoip_cache
+            .lock()
+            .unwrap()
+            .insert(ip.to_string(), location.clone());
+        location
+    }
+
+    fn resolve_geo_location(&self, ip: &str) -> GeoLocation {
+        let default = GeoLocation {
+            country: "unknown".to_string(),
+            region: "unknown".to_string(),
+        };
+
+        let reader = match self.geoip_reader.as_ref() {
+            Some(reader) => reader,
+            None => return default,
+        };
+
+        let ip_addr: IpAddr = match ip.parse() {
+            Ok(ip_addr) => ip_addr,
+            Err(_) => return default,
+        };
+
+        let city: City = match reader.lookup(ip_addr) {
+            Ok(city) => city,
+            Err(_) => return default,
+        };
+
+        let country = city
+            .country
+            .and_then(|country| country.names.and_then(|names| names.get("en").map(|s| s.to_string())))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let region = city
+            .subdivisions
+            .and_then(|subs| {
+                subs.first().and_then(|sub| {
+                    sub.names.as_ref().and_then(|names| names.get("en").map(|s| s.to_string()))
+                })
+            })
+            .or_else(|| {
+                city.city.and_then(|city| {
+                    city.names.and_then(|names| names.get("en").map(|s| s.to_string()))
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        GeoLocation { country, region }
+    }
 }
 
 #[derive(PartialEq, Default)]
@@ -219,6 +294,7 @@ async fn login_handler(
 ) -> Response {
     // 提取客户端 IP 地址
     let client_ip = extract_client_ip(&headers, Some(socket_addr));
+    let geo_location = state.lookup_geo_location(&client_ip);
     let client_id = payload.client_id.clone().unwrap_or_default();
     let redirect_uri = payload.redirect_uri.clone().unwrap_or_default();
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
@@ -309,7 +385,14 @@ async fn login_handler(
                         db::set_user_flag(&db_conn, &user_info.uid, UserFlag::Normal).ok();
                         db::upsert_user(&db_conn, &user, &xuid, &xuxm, &student_id, &gender).ok();
                     }
-                    db::record_login_success(&db_conn, &user_info.uid, &client_ip).ok();
+                    db::record_login_success(
+                        &db_conn,
+                        &user_info.uid,
+                        &client_ip,
+                        &geo_location.country,
+                        &geo_location.region,
+                    )
+                    .ok();
 
                     // 生成session ID并存储用户信息
                     let session_id = Uuid::new_v4().to_string();
@@ -340,7 +423,14 @@ async fn login_handler(
                         db::upsert_user(&db_conn, &user, "", "", "", "").ok();
                     }
                     // 记录登录失败
-                    db::record_login_failure(&db_conn, &user_info.uid, &client_ip).ok();
+                    db::record_login_failure(
+                        &db_conn,
+                        &user_info.uid,
+                        &client_ip,
+                        &geo_location.country,
+                        &geo_location.region,
+                    )
+                    .ok();
 
                     // 检查是否应该锁定账户
                     if user_info.failed_attempts + 1
@@ -390,7 +480,14 @@ async fn login_handler(
                                 &gender,
                             );
                         }
-                        db::record_login_success(&db_conn, &user_info.uid, &client_ip).ok();
+                        db::record_login_success(
+                            &db_conn,
+                            &user_info.uid,
+                            &client_ip,
+                            &geo_location.country,
+                            &geo_location.region,
+                        )
+                        .ok();
 
                         // 生成session ID并存储
                         let session_id = Uuid::new_v4().to_string();
@@ -414,7 +511,14 @@ async fn login_handler(
                             .into_response();
                     }
                     Err(e) => {
-                        db::record_login_failure(&db_conn, &user_info.uid, &client_ip).ok();
+                        db::record_login_failure(
+                            &db_conn,
+                            &user_info.uid,
+                            &client_ip,
+                            &geo_location.country,
+                            &geo_location.region,
+                        )
+                        .ok();
 
                         // 检查是否应该锁定账户
                         if user_info.failed_attempts + 1
@@ -1007,6 +1111,17 @@ async fn main() {
     let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("Failed to generate RSA key");
     let kid = Uuid::new_v4().to_string();
 
+    let geoip_reader = match Reader::open_readfile(&config.geoip_mmdb_path) {
+        Ok(reader) => Some(Arc::new(reader)),
+        Err(err) => {
+            eprintln!(
+                "Warning: failed to open geoip mmdb file '{}': {}",
+                config.geoip_mmdb_path, err
+            );
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         config: config.clone(),
         http_client: reqwest::Client::builder().cookie_store(true).build().unwrap(),
@@ -1014,6 +1129,8 @@ async fn main() {
         code_store: Mutex::new(HashMap::new()),
         session_store: Mutex::new(HashMap::new()),
         db_pool,
+        geoip_reader,
+        geoip_cache: Mutex::new(HashMap::new()),
     });
 
     // 预加载 students CSV 到内存缓存，避免每次查询都打开/读取文件
