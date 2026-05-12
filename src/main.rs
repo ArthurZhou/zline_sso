@@ -34,6 +34,7 @@ struct Config {
     port: u16,
     issuer: String,
     rate_limit: RateLimitConfig,
+    login_record_window: i32,
     geoip_mmdb_path: String,
     frontend_crypto: CryptoConfig,
     account_lockout: AccountLockoutConfig,
@@ -750,7 +751,7 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
     match db::get_user_full_info(&conn, &username) {
         Ok(Some(user_info)) => {
             let login_attempts =
-                db::get_recent_login_attempts(&conn, &user_info.uid, 3).unwrap_or_default();
+                db::get_recent_login_attempts(&conn, &user_info.uid, state.config.login_record_window).unwrap_or_default();
             Json(json!({
                 "username": user_info.username,
                 "role": user_info.role,
