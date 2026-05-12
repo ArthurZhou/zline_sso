@@ -1,0 +1,55 @@
+name: Build and Upload Release Assets
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: latest
+
+      - name: Build Frontend
+        run: |
+          cd ./frontend
+          pnpm install
+          pnpm build
+          cd ..
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Run Backend Build Script
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
+
+      - name: Prepare Release Asset
+        run: |
+          # 进入产物目录并执行重命名
+          cd target/x86_64-unknown-linux-musl/release/ || cd target/x86_64-unknown-linux-musl/debug/
+          cp zline_sso ../../../zline_sso-x86_64-unknown-linux-musl-optimized
+          cd ../../../
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zline_sso-x86_64-unknown-linux-musl-optimized
+          tag_name: ${{ github.event.release.tag_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
