@@ -48,10 +48,10 @@ pub async fn login_page_handler(State(state): State<Arc<AppState>>, jar: CookieJ
     }
 }
 
-pub async fn profile_page_handler(jar: CookieJar) -> Response {
+pub async fn profile_page_handler(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     // 检查cookie是否存在，实际验证由客户端在/auth/profile/api中程成
     if jar.get("sso_session").is_none() {
-        return Redirect::to("/auth/").into_response();
+        return Redirect::to(&state.config.auth_path_prefix.to_string()).into_response();
     }
 
     #[cfg(debug_assertions)]

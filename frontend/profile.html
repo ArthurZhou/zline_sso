@@ -320,16 +320,24 @@
 
     <div class="footer">
         © 2026 校园工作台 SSO |
-        <a href="/auth/agreement">用户协议与隐私政策</a>
+        <a id="agreementLink" href="#">用户协议与隐私政策</a>
     </div>
 
     <script>
+        // 动态检测 auth_path_prefix
+        const url = new URL(window.location);
+        const pathSegments = url.pathname.split('/').filter(s => s);
+        let AUTH_PATH = '/auth';
+        if (pathSegments.length > 0 && pathSegments[0] !== 'auth') {
+            AUTH_PATH = '/' + pathSegments.slice(0, -1).join('/');
+        }
+
         const statusView = document.getElementById('statusView');
         const profileContent = document.getElementById('profileContent');
 
         async function loadProfile() {
             try {
-                const response = await fetch('/auth/profile/api');
+                const response = await fetch(`${AUTH_PATH}/profile/api`);
 
                 if (!response.ok) {
                     if (response.status === 401 || response.status === 403) {
@@ -411,7 +419,7 @@
         function handleSessionError(msg) {
             clearSessionCookie();
             statusView.innerHTML = `<div class="error-message">${escapeHtml(msg)}</div>`;
-            setTimeout(() => { window.location.href = '/auth/'; }, 1500);
+            setTimeout(() => { window.location.href = `${AUTH_PATH}/`; }, 1500);
         }
 
         function renderLoginAttempts(attempts) {
@@ -462,7 +470,7 @@
         }
 
         function clearSessionCookie() {
-            document.cookie = 'sso_session=; path=/auth; expires=Thu, 01 Jan 1970 00:00:00 UTC; HttpOnly; SameSite=Lax;';
+            document.cookie = `sso_session=; path=${AUTH_PATH}; expires=Thu, 01 Jan 1970 00:00:00 UTC; HttpOnly; SameSite=Lax;`;
         }
 
         function escapeHtml(text) {
@@ -473,17 +481,20 @@
         // 登出
         document.getElementById('logoutBtn').addEventListener('click', () => {
             clearSessionCookie();
-            window.location.href = '/auth/logout';
+            window.location.href = `${AUTH_PATH}/logout`;
         });
 
         // 同步外部信息
         document.getElementById('syncBtn').addEventListener('click', async (e) => {
-            const response = await fetch('/auth/logout', {
+            const response = await fetch(`${AUTH_PATH}/logout`, {
                 method: 'GET',
             });
             clearSessionCookie();
-            window.location.href = "/auth/?sync_info=1";
+            window.location.href = `${AUTH_PATH}?sync_info=1`;
         });
+
+        // 更新 agreement 链接
+        document.getElementById('agreementLink').href = `${AUTH_PATH}/agreement`;
 
         loadProfile();
     </script>

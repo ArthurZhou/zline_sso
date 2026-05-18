@@ -158,16 +158,26 @@
         </div>
 
         <div class="footer">
-            继续代表您已同意我们的<a href="/auth/agreement">用户协议与隐私政策</a>.
+            继续代表您已同意我们的<a id="agreementLink" href="#">用户协议与隐私政策</a>.
         </div>
     </div>
 
     <script>
+        // 动态检测 auth_path_prefix
+        function detectAuthPath() {
+            const url = new URL(window.location);
+            const pathSegments = url.pathname.split('/').filter(s => s);
+            // 默认为 /sso，但如果路径不是 / 开头，则取自定义prefix
+            if (pathSegments.length === 0) return '/sso';
+            return '/' + pathSegments[0];
+        }
+        
+        const AUTH_PATH = detectAuthPath();
         const queryParams = window.location.search;
 
         async function handleContinue() {
             try {
-                const resp = await fetch(`/auth/continue${queryParams}`);
+                const resp = await fetch(`${AUTH_PATH}/continue${queryParams}`);
                 if (resp.ok) {
                     const data = await resp.json();
                     
@@ -194,8 +204,11 @@
         }
 
         function handleLogout() {
-            window.location.href = `/auth/logout${queryParams}`;
+            window.location.href = `${AUTH_PATH}/logout${queryParams}`;
         }
+
+        // 更新 agreement 链接
+        document.getElementById('agreementLink').href = `${AUTH_PATH}/agreement`;
     </script>
 </body>
 

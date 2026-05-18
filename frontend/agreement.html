@@ -123,7 +123,18 @@
     </div>
 
     <script>
-        fetch('agreement.md')
+        // 动态检测 auth_path_prefix
+        function detectAuthPath() {
+            const url = new URL(window.location);
+            const pathSegments = url.pathname.split('/').filter(s => s);
+            // 默认为 /sso，但如果路径不是 / 开头，则取自定义prefix
+            if (pathSegments.length === 0) return '/sso';
+            return '/' + pathSegments[0];
+        }
+        
+        const AUTH_PATH = detectAuthPath();
+        
+        fetch(`${AUTH_PATH}/agreement.md`)
             .then(response => {
                 if (!response.ok) throw new Error("File not found");
                 return response.text();

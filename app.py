@@ -5,7 +5,7 @@ app = Flask(__name__)
 app.secret_key = "very_secret_key_123"
 
 # 配置信息（必须与 Rust 端 config.json 一致）
-SSO_BASE_URL = "http://127.0.0.1:8097"
+SSO_BASE_URL = "http://127.0.0.1:8097/sso"
 CLIENT_ID = "test_client"
 CLIENT_SECRET = "test_client_secret"
 
@@ -26,7 +26,7 @@ def login():
     # 手动拼接跳转地址
     callback_url = url_for('callback_handler', _external=True)
     auth_url = (
-        f"{SSO_BASE_URL}/auth/"
+        f"{SSO_BASE_URL}"
         f"?client_id={CLIENT_ID}"
         f"&redirect_uri={callback_url}"
         f"&response_type=code"
@@ -44,7 +44,7 @@ def callback_handler(): # 改个名字，避开可能的 request 变量冲突
     print(f"\n[DEBUG] 拿到 Code: {code}")
 
     # 2. 交换 Token (模仿 pwsh 的 POST 请求)
-    token_url = f"{SSO_BASE_URL}/auth/token"
+    token_url = f"{SSO_BASE_URL}/token"
     payload = {
         "grant_type": "authorization_code",
         "code": code,
@@ -67,7 +67,7 @@ def callback_handler(): # 改个名字，避开可能的 request 变量冲突
         access_token = token_data.get("access_token")
 
         # 3. 请求 UserInfo (模仿 pwsh 的 GET 请求)
-        user_info_url = f"{SSO_BASE_URL}/auth/userinfo"
+        user_info_url = f"{SSO_BASE_URL}/userinfo"
         r_user = requests.get(
             user_info_url,
             headers={"Authorization": f"Bearer {access_token}"},

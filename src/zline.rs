@@ -254,7 +254,7 @@ pub async fn login_with_jincai(
     // 步骤2: 构建加密的登录请求体
     let mut data = HashMap::new();
     data.insert("XToken".into(), xtoken);
-    data.insert("pzlusername".into(), username.clone());
+    data.insert("pzlusername".into(), username);
     data.insert("pzlpassword".into(), password);
 
     let encrypted_body = encrypt_for_jincai(data);

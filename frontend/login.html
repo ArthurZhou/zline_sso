@@ -196,20 +196,31 @@
         <div id="msg"></div>
 
         <div class="footer">
-            继续代表您已同意我们的<a href="/auth/agreement">用户协议与隐私政策</a>.
+            继续代表您已同意我们的<a id="agreementLink" href="#">用户协议与隐私政策</a>.
         </div>
     </div>
 
     <script>
+        // 动态检测 auth_path_prefix
+        function detectAuthPath() {
+            const url = new URL(window.location);
+            const pathSegments = url.pathname.split('/').filter(s => s);
+            // 默认为 /sso，但如果路径不是 / 开头，则取自定义prefix
+            if (pathSegments.length === 0) return '/sso';
+            return '/' + pathSegments[0];
+        }
+        
+        const AUTH_PATH = detectAuthPath();
+
         // 页面加载时检测是否需要清除过期cookie
         async function validateSession() {
             const hasCookie = document.cookie.includes('sso_session');
             if (hasCookie) {
                 try {
-                    const resp = await fetch('/auth/profile/api');
+                    const resp = await fetch(`${AUTH_PATH}/profile/api`);
                     if (!resp.ok) {
                         // Cookie过期，清除它
-                        document.cookie = 'sso_session=; path=/auth; expires=Thu, 01 Jan 1970 00:00:00 UTC;';
+                        document.cookie = `sso_session=; path=${AUTH_PATH}; expires=Thu, 01 Jan 1970 00:00:00 UTC;`;
                     }
                 } catch (e) {
                     // 网络错误，暂不清除
@@ -219,6 +230,9 @@
         
         // 页面加载时验证session
         validateSession();
+
+        // 更新 agreement 链接
+        document.getElementById('agreementLink').href = `${AUTH_PATH}/agreement`;
 
         const loginForm = document.getElementById('loginForm');
         const submitBtn = document.getElementById('submitBtn');
@@ -253,7 +267,7 @@
                 // 如果没有client_id，则为直接登录模式（无OAuth）
                 const isDirectLogin = !clientId || clientId === "";
 
-                const configRes = await fetch('/auth/crypto-config');
+                const configRes = await fetch(`${AUTH_PATH}/crypto-config`);
                 if (!configRes.ok) {
                     throw new Error('获取配置失败');
                 }
@@ -263,7 +277,7 @@
                 const rawPayload = `${document.getElementById('username').value}|${document.getElementById('password').value}|${Math.floor(Date.now() / 1000)}`;
                 const encryptedData = await webCryptoEncrypt(rawPayload, shared_key);
 
-                const res = await fetch('/auth/login', {
+                const res = await fetch(`${AUTH_PATH}/login`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({

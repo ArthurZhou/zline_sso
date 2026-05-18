@@ -33,6 +33,7 @@ struct Config {
     host: String,
     port: u16,
     issuer: String,
+    auth_path_prefix: String,
     rate_limit: RateLimitConfig,
     login_record_window: i32,
     geoip_mmdb_path: String,
@@ -304,16 +305,17 @@ async fn logout_handler(
         state.session_store.lock().unwrap().remove(session_cookie.value());
     }
 
-    let query_str = serde_urlencoded::to_string(&params).unwrap_or_default(); // 保存当前url
+    let query_str = serde_urlencoded::to_string(&params).unwrap_or_default();
+    let auth_path = state.config.auth_path_prefix.clone();
     let remove_cookie = Cookie::build(("sso_session", ""))
-        .path("/auth")
+        .path(auth_path.clone())
         .http_only(true)
         .max_age(time::Duration::ZERO)
         .build();
 
     (
         jar.add(remove_cookie),
-        Redirect::to(&format!("/auth/?{}", query_str)),
+        Redirect::to(&format!("{}?{}", auth_path, query_str)),
     )
 }
 
@@ -327,10 +329,10 @@ async fn login_handler(
     // 提取客户端 IP 地址
     let client_ip = extract_client_ip(&headers, Some(socket_addr));
     let geo_location = state.lookup_geo_location(&client_ip);
-    let client_id = payload.client_id.clone().unwrap_or_default();
-    let redirect_uri = payload.redirect_uri.clone().unwrap_or_default();
+    let client_id = payload.client_id.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let redirect_uri = payload.redirect_uri.as_ref().map(|s| s.as_str()).unwrap_or("");
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
-    let mut sync_info = payload.sync_info.clone().unwrap_or_default();
+    let mut sync_info = payload.sync_info.unwrap_or_default();
     let mut new_user_record = false;
 
     // 带参数，即从外部app发起验证时，验证 OAuth 参数
@@ -438,12 +440,12 @@ async fn login_handler(
 
                     // 验证成功，生成登录响应
                     return (
-                        jar.add(create_sso_cookie(session_id, remember)),
+                        jar.add(create_sso_cookie(axum::extract::State(state.clone()), session_id, remember)),
                         handle_login_response(
                             &state,
                             user,
-                            client_id,
-                            redirect_uri,
+                            client_id.to_string(),
+                            redirect_uri.to_string(),
                             payload.state,
                             is_direct_login,
                         ),
@@ -532,11 +534,12 @@ async fn login_handler(
                         );
 
                         // 允许进入个人中心
+                        let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
                         return (
-                            jar.add(create_sso_cookie(session_id, remember)),
+                            jar.add(create_sso_cookie(axum::extract::State(state), session_id, remember)),
                             Json(json!({
                                 "code": "profile",
-                                "redirect_uri": "/auth/profile",
+                                "redirect_uri": redirect_uri,
                                 "is_direct_login": true
                             })),
                         )
@@ -598,12 +601,12 @@ async fn login_handler(
                 },
             );
             return (
-                jar.add(create_sso_cookie(session_id, remember)),
+                jar.add(create_sso_cookie(axum::extract::State(state.clone()), session_id, remember)),
                 handle_login_response(
                     &state,
                     user,
-                    client_id,
-                    redirect_uri,
+                    client_id.to_string(),
+                    redirect_uri.to_string(),
                     payload.state,
                     is_direct_login,
                 ),
@@ -633,8 +636,8 @@ async fn continue_handler(
         None => return Json(json!({"error": "会话已过期"})).into_response(),
     };
 
-    let client_id = payload.client_id.clone().unwrap_or_default();
-    let redirect_uri = payload.redirect_uri.clone().unwrap_or_default();
+    let client_id = payload.client_id.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let redirect_uri = payload.redirect_uri.as_ref().map(|s| s.as_str()).unwrap_or("");
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
 
     if !is_direct_login {
@@ -681,16 +684,17 @@ async fn continue_handler(
                 return handle_login_response(
                     &state,
                     user,
-                    client_id,
-                    redirect_uri,
+                    client_id.to_string(),
+                    redirect_uri.to_string(),
                     payload.state,
                     is_direct_login,
                 );
             } else {
                 // 允许进入个人中心
+                let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
                 return Json(json!({
                     "code": "profile",
-                    "redirect_uri": "/auth/profile",
+                    "redirect_uri": redirect_uri,
                     "is_direct_login": true
                 }))
                 .into_response();
@@ -699,9 +703,10 @@ async fn continue_handler(
         UserState::Restricted => {
             if is_direct_login {
                 // 允许进入个人中心
+                let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
                 return Json(json!({
                     "code": "profile",
-                    "redirect_uri": "/auth/profile",
+                    "redirect_uri": redirect_uri,
                     "is_direct_login": true
                 }))
                 .into_response();
@@ -817,12 +822,12 @@ async fn token_exchange_handler(
         let claims = Claims {
             iss: state.config.issuer.clone(),
             sub: session.username,
-            aud: payload.client_id,
+            aud: payload.client_id.clone(),
             iat: now,
             exp: now + 3600,
         };
 
-        let keys = state.keys.read().unwrap().clone();
+        let keys = state.keys.read().unwrap();
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         header.kid = Some(keys.1.clone());
 
@@ -937,7 +942,7 @@ async fn userinfo_handler(
 async fn jwks_handler(State(state): State<Arc<AppState>>) -> Response {
     use rsa::traits::PublicKeyParts;
 
-    let keys = state.keys.read().unwrap().clone();
+    let keys = state.keys.read().unwrap();
     let pub_key = keys.0.to_public_key();
 
     let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pub_key.n().to_bytes_be());
@@ -948,7 +953,7 @@ async fn jwks_handler(State(state): State<Arc<AppState>>) -> Response {
             "kty": "RSA",
             "alg": "RS256",
             "use": "sig",
-            "kid": keys.1,
+            "kid": keys.1.clone(),
             "n": n,
             "e": e
         }]
@@ -958,12 +963,15 @@ async fn jwks_handler(State(state): State<Arc<AppState>>) -> Response {
 
 /// oidc端点解释,必须绑定到 /.well-known/openid-configuration
 async fn oidc_config_handler(State(state): State<Arc<AppState>>) -> Response {
+    let prefix = &state.config.auth_path_prefix;
+    let issuer = &state.config.issuer;
+
     Json(json!({
-        "issuer": state.config.issuer,
-        "authorization_endpoint": format!("{}/auth/", state.config.issuer),
-        "token_endpoint": format!("{}/auth/token", state.config.issuer),
-        "userinfo_endpoint": format!("{}/auth/userinfo", state.config.issuer),
-        "jwks_uri": format!("{}/auth/jwks", state.config.issuer),
+        "issuer": issuer,
+        "authorization_endpoint": format!("{}{}/", issuer, prefix),
+        "token_endpoint": format!("{}{}/token", issuer, prefix),
+        "userinfo_endpoint": format!("{}{}/userinfo", issuer, prefix),
+        "jwks_uri": format!("{}{}/jwks", issuer, prefix),
         "response_types_supported": ["code"],
         "id_token_signing_alg_values_supported": ["RS256"]
     }))
@@ -1052,9 +1060,9 @@ fn decrypt_frontend_payload(
 ///
 /// # 返回值
 /// 返回构建好的Cookie，可直接用于HTTP响应
-pub fn create_sso_cookie(session_id: String, remember: bool) -> Cookie<'static> {
+fn create_sso_cookie(State(state): State<Arc<AppState>>, session_id: String, remember: bool) -> Cookie<'static> {
     let mut builder = Cookie::build(("sso_session", session_id))
-        .path("/auth")
+        .path(state.config.auth_path_prefix.clone())
         .http_only(true)
         .same_site(axum_extra::extract::cookie::SameSite::Lax);
 
@@ -1112,30 +1120,22 @@ fn handle_login_response(
         .into_response()
     } else {
         // 个人中心登录
+        let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
         return Json(json!({
             "code": "profile",
-            "redirect_uri": "/auth/profile",
+            "redirect_uri": redirect_uri,
             "state": oauth_state,
             "is_direct_login": true
         }))
         .into_response();
     }
 }
-// ============ 主程序 ============
+// ============ 初始化函数 ============
 
-#[tokio::main]
-async fn main() {
-    let config_str = fs::read_to_string("config.json").expect("config.json not found");
-    let mut config: Config =
-        serde_json::from_str(&config_str).expect("Failed to parse config.json");
-    if config.issuer.ends_with('/') {
-        config.issuer.pop();
-    }
-
+fn init_app_state(config: Config) -> Arc<AppState> {
     let db_path = "users.db".to_string();
     db::init_db(&db_path).expect("Failed to init database");
 
-    // 创建数据库连接池
     let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path);
     let db_pool = r2d2::Pool::new(manager).expect("Failed to create database pool");
 
@@ -1154,7 +1154,7 @@ async fn main() {
         }
     };
 
-    let state = Arc::new(AppState {
+    Arc::new(AppState {
         config: config.clone(),
         http_client: reqwest::Client::builder().cookie_store(true).build().unwrap(),
         keys: RwLock::new(Arc::new((private_key, kid))),
@@ -1163,42 +1163,69 @@ async fn main() {
         db_pool,
         geoip_reader,
         geoip_cache: Mutex::new(HashMap::new()),
-    });
+    })
+}
 
-    // 预加载 students CSV 到内存缓存，避免每次查询都打开/读取文件
+#[tokio::main]
+async fn main() {
+    let config_str = fs::read_to_string("config.json").expect("config.json not found");
+    let mut config: Config =
+        serde_json::from_str(&config_str).expect("Failed to parse config.json");
+    if config.issuer.ends_with('/') {
+        config.issuer.pop();
+    }
+
+    // 预加载 students CSV 到内存缓存
     if let Err(e) = zline::load_csv_cache("students_data.csv") {
         eprintln!("Warning: failed to load students_data.csv: {}", e);
     }
 
+    let state = init_app_state(config.clone());
+    let prefix = state.config.auth_path_prefix.clone();
+
+    // 速率限制配置
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(1)
-            .burst_size(config.rate_limit.per_second as u32)
+            .burst_size(state.config.rate_limit.per_second as u32)
             .key_extractor(PeerIpKeyExtractor)
             .use_headers()
             .finish()
             .unwrap(),
     );
 
+    // 1. 构造受 prefix 影响的业务路由
+    // 注意：这里原本的 "/" 建议改写成空字符串 "" 或者保持 "/" 但在外部处理冲突
+    let auth_router = Router::new()
+        .route("/", get(statics::login_page_handler)) // 对应 {prefix}/
+        .route("/crypto-config", get(crypto_config_handler))
+        .route("/agreement", get(statics::agreement_html_handler))
+        .route("/agreement.md", get(statics::agreement_md_handler))
+        .route("/login", post(login_handler))
+        .route("/continue", get(continue_handler))
+        .route("/logout", get(logout_handler))
+        .route("/profile", get(statics::profile_page_handler))
+        .route("/profile/api", get(profile_api_handler))
+        .route("/token", post(token_exchange_handler))
+        .route("/userinfo", get(userinfo_handler))
+        .route("/jwks", get(jwks_handler));
+
+    // 2. 构造主路由
     let app = Router::new()
-        .route("/", get(|| async { Redirect::permanent("/auth/") })) // 根路径重定向
-        .route("/auth", get(|| async { Redirect::permanent("/auth/") })) // 补全尾部斜杠
-        .route("/auth/crypto-config", get(crypto_config_handler))
-        .route("/auth/agreement", get(statics::agreement_html_handler)) // 静态 HTML
-        .route("/auth/agreement.md", get(statics::agreement_md_handler)) // 静态 MD
-        .route("/auth/login", post(login_handler))
-        .route("/auth/", get(statics::login_page_handler))
-        .route("/auth/continue", get(continue_handler))
-        .route("/auth/logout", get(logout_handler))
-        .route("/auth/profile", get(statics::profile_page_handler))
-        .route("/auth/profile/api", get(profile_api_handler))
-        .route("/auth/token", post(token_exchange_handler))
-        .route("/auth/userinfo", get(userinfo_handler))
-        .route("/auth/jwks", get(jwks_handler))
-        .route(
-            "/.well-known/openid-configuration",
-            get(oidc_config_handler),
-        )
+        // 根目录直接跳转到 prefix/
+        .route("/", get({
+            let p = prefix.clone();
+            move || {
+                let path = format!("{p}");
+                async move { Redirect::temporary(&path) }
+            }
+        }))
+        // 使用 nest 挂载业务路由
+        // Axum 的 nest 会自动处理不带斜杠的访问（如果子路由有 "/"）
+        // 但为了彻底消除重复定义的冲突，我们只在这里 nest
+        .nest(&prefix, auth_router)
+        // 固定路径不受 nest 影响
+        .route("/.well-known/openid-configuration", get(oidc_config_handler))
         .layer(GovernorLayer {
             config: governor_conf,
         })
@@ -1212,6 +1239,7 @@ async fn main() {
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     println!("服务运行在 http://{}", addr);
+    
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
