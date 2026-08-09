@@ -369,3 +369,122 @@ pub fn get_recent_login_attempts(
     }
     Ok(attempts)
 }
+
+/// 全量登录日志条目（管理员使用，含用户名与完整 IP）
+#[derive(Debug, Clone, Serialize)]
+pub struct AllLoginLog {
+    pub username: String,
+    pub success: bool,
+    pub ip_address: Option<String>,
+    pub country: Option<String>,
+    pub region: Option<String>,
+    pub timestamp: String,
+}
+
+/// 查询用户列表（管理员使用）。
+///
+/// `keyword` 为空时返回全部用户；否则按用户名/姓名/外部ID 模糊匹配。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `keyword`: 搜索关键字（可为空字符串表示全部）
+/// - `limit`: 每页条数
+/// - `offset`: 偏移量（用于分页）
+///
+/// # 返回值
+/// - `Ok(Vec<UserInfo>)`: 用户列表
+pub fn list_users(
+    conn: &DbConn,
+    keyword: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<UserInfo>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT uid, username, role, external_uid, full_name, student_id, gender, flag, state, \
+         state_description, restriction_end_time, last_login_time, failed_attempts \
+         FROM users \
+         WHERE (?1 = '' OR username LIKE '%'||?1||'%' OR full_name LIKE '%'||?1||'%' OR external_uid LIKE '%'||?1||'%') \
+         ORDER BY last_login_time DESC \
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![keyword, limit, offset], |row| {
+        Ok(UserInfo {
+            uid: row.get(0)?,
+            username: row.get(1)?,
+            role: row.get(2)?,
+            external_uid: row.get(3)?,
+            full_name: row.get(4)?,
+            student_id: row.get(5)?,
+            gender: row.get(6)?,
+            flag: row.get(7)?,
+            state: row.get(8)?,
+            state_description: row.get(9)?,
+            restriction_end_time: row.get(10)?,
+            last_login_time: row.get(11)?,
+            failed_attempts: row.get(12)?,
+        })
+    })?;
+
+    let mut users = Vec::new();
+    for row in rows {
+        users.push(row?);
+    }
+    Ok(users)
+}
+
+/// 设置用户角色（管理员使用）。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `uid`: 用户 uuid
+/// - `role`: 新角色，如 "user" / "admin"
+pub fn set_user_role(conn: &DbConn, uid: &str, role: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE users SET role=?2 WHERE uid=?1",
+        rusqlite::params![uid, role],
+    )?;
+    Ok(())
+}
+
+/// 查询全量登录日志（管理员使用，跨所有用户）。
+///
+/// `keyword` 为空时返回全部；否则按用户名模糊匹配。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `keyword`: 搜索关键字（可为空字符串表示全部）
+/// - `limit`: 每页条数
+/// - `offset`: 偏移量（用于分页）
+///
+/// # 返回值
+/// - `Ok(Vec<AllLoginLog>)`: 日志列表
+pub fn list_all_login_logs(
+    conn: &DbConn,
+    keyword: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AllLoginLog>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT u.username, l.success, l.ip_address, l.country, l.region, l.timestamp \
+         FROM login_logs l JOIN users u ON u.uid = l.uid \
+         WHERE (?1 = '' OR u.username LIKE '%'||?1||'%') \
+         ORDER BY l.timestamp DESC \
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![keyword, limit, offset], |row| {
+        Ok(AllLoginLog {
+            username: row.get(0)?,
+            success: row.get::<_, i32>(1)? == 1,
+            ip_address: row.get(2)?,
+            country: row.get(3)?,
+            region: row.get(4)?,
+            timestamp: row.get(5)?,
+        })
+    })?;
+
+    let mut logs = Vec::new();
+    for row in rows {
+        logs.push(row?);
+    }
+    Ok(logs)
+}

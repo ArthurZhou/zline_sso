@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>管理控制台 - 校园工作台 SSO</title>
+    <style>
+        @font-face {
+            font-family: sarasa;
+            src: url('/font.woff');
+        }
+
+        :root {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --border: #1a1a1a;
+            --input-bg: #f2f2f2;
+            --accent: #000000;
+            --accent-text: #ffffff;
+            --error: #e63946;
+            --success: #06d6a0;
+            --warn: #f4a261;
+            --muted: #666666;
+            --card-bg: #f9f9f9;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #121212;
+                --text: #eeeeee;
+                --border: #444444;
+                --input-bg: #1e1e1e;
+                --accent: #eeeeee;
+                --accent-text: #121212;
+                --muted: #888888;
+                --card-bg: #1e1e1e;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            margin: 0;
+            font-family: ui-monospace, sarasa, monospace;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            border-bottom: 4px solid var(--border);
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            text-transform: uppercase;
+            font-weight: 900;
+        }
+
+        .header-right {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: 2px solid var(--border);
+            background: var(--accent);
+            color: var(--accent-text);
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+        }
+
+        .btn-sm {
+            padding: 4px 10px;
+            font-size: 11px;
+        }
+
+        .btn-ghost {
+            background: transparent;
+            color: var(--text);
+        }
+
+        .btn-logout {
+            background: var(--error);
+            color: var(--accent-text);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            border: 2px solid var(--border);
+            border-bottom: none;
+            background: var(--card-bg);
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .tab.active {
+            background: var(--accent);
+            color: var(--accent-text);
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+
+        .toolbar input[type="text"] {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px;
+            background: var(--input-bg);
+            border: 2px solid var(--border);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 13px;
+            outline: none;
+        }
+
+        .toolbar input[type="text"]:focus {
+            background: var(--bg);
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+            border: 2px solid var(--border);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 10px;
+            border-bottom: 1px solid var(--input-bg);
+            vertical-align: middle;
+        }
+
+        th {
+            background: var(--card-bg);
+            text-transform: uppercase;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: 2px;
+            text-transform: uppercase;
+        }
+
+        .badge-ok {
+            background: var(--success);
+            color: #000;
+        }
+
+        .badge-warn {
+            background: var(--warn);
+            color: #000;
+        }
+
+        .badge-err {
+            background: var(--error);
+            color: white;
+        }
+
+        .actions {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            white-space: nowrap;
+        }
+
+        .actions select {
+            padding: 4px;
+            background: var(--input-bg);
+            border: 2px solid var(--border);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 11px;
+        }
+
+        .pager {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 15px;
+            justify-content: flex-end;
+        }
+
+        .msg {
+            margin: 10px 0;
+            font-size: 13px;
+            font-weight: 700;
+            min-height: 1.2em;
+        }
+
+        .msg.error {
+            color: var(--error);
+        }
+
+        .msg.success {
+            color: var(--success);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .empty {
+            text-align: center;
+            padding: 30px;
+            color: var(--muted);
+        }
+
+        .view {
+            display: none;
+        }
+
+        .view.active {
+            display: block;
+        }
+
+        .footer {
+            margin-top: 40px;
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.6;
+            text-align: center;
+        }
+
+        @media (max-width: 600px) {
+            .header {
+                flex-direction: column;
+                gap: 15px;
+                align-items: flex-start;
+            }
+
+            .header-right,
+            .btn-logout {
+                width: 100%;
+            }
+
+            .actions {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>管理控制台</h1>
+            <div class="header-right">
+                <span id="adminWho" style="font-size:12px;color:var(--muted);"></span>
+                <button class="btn btn-logout" id="logoutBtn">登出</button>
+            </div>
+        </div>
+
+        <div id="statusView" class="loading">加载中...</div>
+
+        <div id="console" style="display:none;">
+            <div class="tabs">
+                <button class="tab active" data-tab="users">用户管理</button>
+                <button class="tab" data-tab="logs">登录日志</button>
+            </div>
+
+            <div id="msg" class="msg"></div>
+
+            <!-- 用户管理 -->
+            <div id="view-users" class="view active">
+                <div class="toolbar">
+                    <input type="text" id="userKeyword" placeholder="搜索 用户名 / 姓名 / 外部ID">
+                    <button class="btn" id="userSearchBtn">查询</button>
+                </div>
+                <div id="userTableWrap" class="table-wrap"></div>
+                <div class="pager">
+                    <button class="btn btn-sm btn-ghost" id="userPrev">上一页</button>
+                    <span id="userPageInfo" style="font-size:12px;color:var(--muted);"></span>
+                    <button class="btn btn-sm btn-ghost" id="userNext">下一页</button>
+                </div>
+            </div>
+
+            <!-- 登录日志 -->
+            <div id="view-logs" class="view">
+                <div class="toolbar">
+                    <input type="text" id="logKeyword" placeholder="按用户名搜索日志">
+                    <button class="btn" id="logSearchBtn">查询</button>
+                </div>
+                <div id="logTableWrap" class="table-wrap"></div>
+                <div class="pager">
+                    <button class="btn btn-sm btn-ghost" id="logPrev">上一页</button>
+                    <span id="logPageInfo" style="font-size:12px;color:var(--muted);"></span>
+                    <button class="btn btn-sm btn-ghost" id="logNext">下一页</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            © 2026 校园工作台 SSO | 管理控制台
+        </div>
+    </div>
+
+    <script>
+        const url = new URL(window.location);
+        const pathSegments = url.pathname.split('/').filter(s => s);
+        let AUTH_PATH = '/auth';
+        if (pathSegments.length > 0 && pathSegments[0] !== 'auth') {
+            AUTH_PATH = '/' + pathSegments.slice(0, -1).join('/');
+        }
+
+        const statusView = document.getElementById('statusView');
+        const consoleEl = document.getElementById('console');
+        const msgEl = document.getElementById('msg');
+
+        function esc(text) {
+            const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+            return String(text == null ? '' : text).replace(/[&<>"']/g, m => map[m]);
+        }
+
+        function clearSessionCookie() {
+            document.cookie = `sso_session=; path=${AUTH_PATH}; expires=Thu, 01 Jan 1970 00:00:00 UTC; HttpOnly; SameSite=Lax;`;
+        }
+
+        function formatLocalTime(t) {
+            if (!t) return '-';
+            const d = new Date(t + (t.includes('T') ? '' : ' UTC'));
+            if (isNaN(d.getTime())) return t;
+            return d.toLocaleString();
+        }
+
+        function showMsg(text, isError) {
+            msgEl.textContent = text || '';
+            msgEl.className = 'msg ' + (isError ? 'error' : 'success');
+            if (text) setTimeout(() => { msgEl.textContent = ''; }, 3000);
+        }
+
+        function stateBadge(state, desc) {
+            if (state === 1 || state === 2) {
+                return '<span class="badge badge-err">已禁用</span>' +
+                    (desc ? '<span style="color:var(--muted);font-size:11px;"> ' + esc(desc) + '</span>' : '');
+            }
+            if (state === 3) return '<span class="badge badge-warn">跳过验证</span>';
+            return '<span class="badge badge-ok">正常</span>';
+        }
+
+        function handleSessionError(msg) {
+            clearSessionCookie();
+            statusView.style.display = 'block';
+            statusView.innerHTML = `<div style="color:var(--error);font-weight:700;">${esc(msg)}</div>`;
+            setTimeout(() => { window.location.href = `${AUTH_PATH}/`; }, 1500);
+        }
+
+        async function checkSession() {
+            try {
+                const r = await fetch(`${AUTH_PATH}/profile/api`);
+                if (!r.ok) { handleSessionError('会话已过期，正在重定向到登录页...'); return null; }
+                const d = await r.json();
+                if (d.error || !d.is_admin) { handleSessionError('需要管理员权限'); return null; }
+                return d;
+            } catch (e) {
+                handleSessionError('网络错误');
+                return null;
+            }
+        }
+
+        // 分页状态
+        const users = { keyword: '', offset: 0, limit: 50, hasMore: false };
+        const logs = { keyword: '', offset: 0, limit: 100, hasMore: false };
+
+        // ---- 用户管理 ----
+        async function loadUsers(offset) {
+            users.offset = offset;
+            const params = new URLSearchParams({ keyword: users.keyword, limit: users.limit, offset: users.offset });
+            const r = await fetch(`${AUTH_PATH}/admin/api/users?${params}`);
+            if (r.status === 403 || r.status === 401) { handleSessionError('需要管理员权限'); return; }
+            const data = await r.json();
+            if (data.error) { showMsg(data.error, true); return; }
+            const list = data.users || [];
+            users.hasMore = list.length >= users.limit;
+            renderUsers(list);
+            document.getElementById('userPageInfo').textContent =
+                `第 ${Math.floor(users.offset / users.limit) + 1} 页${users.hasMore ? '+' : ''}`;
+        }
+
+        function renderUsers(list) {
+            const wrap = document.getElementById('userTableWrap');
+            if (!list.length) {
+                wrap.innerHTML = '<div class="empty">没有找到用户</div>';
+                return;
+            }
+            let html = `<table>
+                <thead><tr>
+                    <th>用户名</th><th>姓名</th><th>外部ID</th><th>角色</th>
+                    <th>状态</th><th>最后登录</th><th>失败次数</th><th>操作</th>
+                </tr></thead><tbody>`;
+            for (const u of list) {
+                const roleSel = `<select data-uid="${esc(u.uid)}" data-username="${esc(u.username)}">
+                    ${['user', 'admin', 'staff'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
+                </select>`;
+                const banBtn = (u.state === 1 || u.state === 2)
+                    ? `<button class="btn btn-sm" data-act="unban" data-username="${esc(u.username)}" style="background:var(--success);color:#000;">解封</button>`
+                    : `<button class="btn btn-sm" data-act="ban" data-username="${esc(u.username)}" style="background:var(--error);">封禁</button>`;
+                html += `<tr>
+                    <td><strong>${esc(u.username)}</strong></td>
+                    <td>${esc(u.full_name) || '-'}</td>
+                    <td>${esc(u.external_uid) || '-'}</td>
+                    <td>${roleSel}</td>
+                    <td>${stateBadge(u.state, u.state_description)}</td>
+                    <td>${formatLocalTime(u.last_login_time)}</td>
+                    <td>${u.failed_attempts}</td>
+                    <td class="actions">${banBtn}</td>
+                </tr>`;
+            }
+            html += '</tbody></table>';
+            wrap.innerHTML = html;
+        }
+
+        // ---- 登录日志 ----
+        async function loadLogs(offset) {
+            logs.offset = offset;
+            const params = new URLSearchParams({ keyword: logs.keyword, limit: logs.limit, offset: logs.offset });
+            const r = await fetch(`${AUTH_PATH}/admin/api/logs?${params}`);
+            if (r.status === 403 || r.status === 401) { handleSessionError('需要管理员权限'); return; }
+            const data = await r.json();
+            if (data.error) { showMsg(data.error, true); return; }
+            const list = data.logs || [];
+            logs.hasMore = list.length >= logs.limit;
+            renderLogs(list);
+            document.getElementById('logPageInfo').textContent =
+                `第 ${Math.floor(logs.offset / logs.limit) + 1} 页${logs.hasMore ? '+' : ''}`;
+        }
+
+        function renderLogs(list) {
+            const wrap = document.getElementById('logTableWrap');
+            if (!list.length) {
+                wrap.innerHTML = '<div class="empty">没有登录日志</div>';
+                return;
+            }
+            let html = `<table>
+                <thead><tr><th>时间</th><th>用户名</th><th>结果</th><th>IP</th><th>位置</th></tr></thead><tbody>`;
+            for (const l of list) {
+                const geo = [l.country, l.region].filter(Boolean).join(',');
+                html += `<tr>
+                    <td>${formatLocalTime(l.timestamp)}</td>
+                    <td><strong>${esc(l.username)}</strong></td>
+                    <td>${l.success ? '<span class="badge badge-ok">成功</span>' : '<span class="badge badge-err">失败</span>'}</td>
+                    <td>${esc(l.ip_address) || '-'}</td>
+                    <td>${esc(geo) || '-'}</td>
+                </tr>`;
+            }
+            html += '</tbody></table>';
+            wrap.innerHTML = html;
+        }
+
+        // ---- 动作 ----
+        async function doBan(username) {
+            const reason = window.prompt(`封禁用户 ${username}，请输入原因（可选）：`, '');
+            if (reason === null) return; // 取消
+            const durInput = window.prompt('封禁时长（小时），留空或 0 = 永久封禁：', '');
+            let duration_hours = null;
+            if (durInput && durInput.trim() !== '') {
+                const n = parseInt(durInput, 10);
+                if (!isNaN(n) && n > 0) duration_hours = n;
+            }
+            const r = await fetch(`${AUTH_PATH}/admin/api/users/${encodeURIComponent(username)}/ban`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: reason || undefined, duration_hours }),
+            });
+            const d = await r.json();
+            if (d.error) showMsg(d.error, true); else { showMsg(d.message || '已封禁'); loadUsers(users.offset); }
+        }
+
+        async function doUnban(username) {
+            const r = await fetch(`${AUTH_PATH}/admin/api/users/${encodeURIComponent(username)}/unban`, { method: 'POST' });
+            const d = await r.json();
+            if (d.error) showMsg(d.error, true); else { showMsg(d.message || '已解封'); loadUsers(users.offset); }
+        }
+
+        async function doRole(uid, username, role) {
+            const r = await fetch(`${AUTH_PATH}/admin/api/users/${encodeURIComponent(username)}/role`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role }),
+            });
+            const d = await r.json();
+            if (d.error) showMsg(d.error, true); else showMsg(d.message || '角色已更新');
+        }
+
+        // ---- 事件绑定 ----
+        document.addEventListener('click', async (e) => {
+            const btn = e.target.closest('button[data-act]');
+            if (btn) {
+                const act = btn.dataset.act;
+                const username = btn.dataset.username;
+                if (act === 'ban') await doBan(username);
+                else if (act === 'unban') await doUnban(username);
+                return;
+            }
+            const tab = e.target.closest('.tab');
+            if (tab) {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+                document.getElementById('view-' + tab.dataset.tab).classList.add('active');
+            }
+        });
+
+        document.addEventListener('change', async (e) => {
+            const sel = e.target.closest('select[data-uid]');
+            if (sel) {
+                if (window.confirm(`确定将用户 ${sel.dataset.username} 的角色设为 ${sel.value} 吗？`)) {
+                    await doRole(sel.dataset.uid, sel.dataset.username, sel.value);
+                } else {
+                    loadUsers(users.offset);
+                }
+            }
+        });
+
+        document.getElementById('userSearchBtn').addEventListener('click', () => {
+            users.keyword = document.getElementById('userKeyword').value.trim();
+            loadUsers(0);
+        });
+        document.getElementById('userKeyword').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('userSearchBtn').click();
+        });
+        document.getElementById('userPrev').addEventListener('click', () => {
+            if (users.offset > 0) loadUsers(Math.max(0, users.offset - users.limit));
+        });
+        document.getElementById('userNext').addEventListener('click', () => {
+            if (users.hasMore) loadUsers(users.offset + users.limit);
+        });
+
+        document.getElementById('logSearchBtn').addEventListener('click', () => {
+            logs.keyword = document.getElementById('logKeyword').value.trim();
+            loadLogs(0);
+        });
+        document.getElementById('logKeyword').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('logSearchBtn').click();
+        });
+        document.getElementById('logPrev').addEventListener('click', () => {
+            if (logs.offset > 0) loadLogs(Math.max(0, logs.offset - logs.limit));
+        });
+        document.getElementById('logNext').addEventListener('click', () => {
+            if (logs.hasMore) loadLogs(logs.offset + logs.limit);
+        });
+
+        document.getElementById('logoutBtn').addEventListener('click', () => {
+            clearSessionCookie();
+            window.location.href = `${AUTH_PATH}/logout`;
+        });
+
+        // 初始化
+        (async function init() {
+            const admin = await checkSession();
+            if (!admin) return;
+            document.getElementById('adminWho').textContent = `当前管理员：${admin.username}`;
+            statusView.style.display = 'none';
+            consoleEl.style.display = 'block';
+            loadUsers(0);
+            loadLogs(0);
+        })();
+    </script>
+</body>
+
+</html>

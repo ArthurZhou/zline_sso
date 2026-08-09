@@ -8,7 +8,7 @@ use aes_gcm::{
 };
 use axum::{
     Form, Router,
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::header::HeaderValue,
     response::{IntoResponse, Json, Redirect, Response},
     routing::{get, post},
@@ -19,6 +19,7 @@ use base64::engine::general_purpose;
 use maxminddb::Reader;
 use regex::Regex;
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -50,7 +51,14 @@ struct Config {
     frontend_crypto: CryptoConfig,
     account_lockout: AccountLockoutConfig,
     cors_allowed_origins: Vec<String>,
+    admin: AdminConfig,
     clients: Vec<ClientConfig>,
+}
+
+#[derive(Deserialize, Clone)]
+struct AdminConfig {
+    username: String,
+    password_hash: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -98,6 +106,20 @@ struct TokenExchangeRequest {
     client_secret: String,
 }
 
+/// 管理员设置角色请求
+#[derive(Deserialize)]
+struct AdminRoleRequest {
+    role: String,
+}
+
+/// 管理员封禁请求
+#[derive(Deserialize)]
+struct AdminBanRequest {
+    reason: Option<String>,
+    /// 封禁时长（小时），缺省/为 0 时表示永久封禁
+    duration_hours: Option<i64>,
+}
+
 /// Access Token 声明（携带者令牌，用于 userinfo 端点）
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -131,6 +153,9 @@ struct AuthSession {
 
 struct SessionData {
     username: String,
+    /// 是否通过管理员密码验证登录（仅管理员密码命中时为 true）。
+    /// 管理员用户名同时可能是普通进才账户，因此不能仅凭用户名判定管理员。
+    is_admin: bool,
     #[allow(dead_code)]
     created_at: std::time::SystemTime,
 }
@@ -173,8 +198,7 @@ impl AppState {
         location
     }
 
-    fn resolve_geo_location(&self, ip: &str) -> GeoLocation {
-        let default_unknown = GeoLocation {
+    fn resolve_geo_location(&self, ip: &str) -> GeoLocation {        let default_unknown = GeoLocation {
             country: "未知".to_string(),
             region: "未知".to_string(),
         };
@@ -271,6 +295,19 @@ impl AppState {
             geoip.clear();
         }
     }
+
+    /// 判断给定用户名与密码是否为配置中的管理员账户。
+    ///
+    /// 该校验完全在本地完成（密码取 SHA-256 摘要后与配置中的摘要进行恒定时间比较），
+    /// 因此管理员凭据绝不会被发送到外部（进才）系统验证。
+    fn is_admin(&self, username: &str, password: &str) -> bool {
+        if username != self.config.admin.username {
+            return false;
+        }
+        let digest = sha256_hex(password);
+        constant_time_eq(&digest, &self.config.admin.password_hash)
+    }
+
 }
 
 #[derive(PartialEq, Default)]
@@ -443,6 +480,46 @@ async fn login_handler(
     };
     // 记住登录状态的选项
     let remember = payload.remember.unwrap_or(false);
+
+    // 管理员账户本地预检：在发往外部（进才）验证之前先校验，
+    // 命中管理员账户则直接完成登录，避免管理员凭据泄漏到进才系统。
+    if state.is_admin(&user, &pass) {
+        // 管理员账户仅允许用户中心（直接）登录，不允许 OAuth 授权
+        if !is_direct_login {
+            return Json(
+                json!({"error": "管理员账户不允许OAuth授权，请在用户中心直接登录"}),
+            )
+            .into_response();
+        }
+
+        // 管理员直接登录用户中心（adminui）
+        let session_id = Uuid::new_v4().to_string();
+        state.session_store.lock().unwrap().insert(
+            session_id.clone(),
+            SessionData {
+                username: user.clone(),
+                is_admin: true,
+                created_at: std::time::SystemTime::now(),
+            },
+        );
+
+        let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
+        info!(username = %user, ip = %client_ip, "管理员登录成功");
+        return (
+            jar.add(create_sso_cookie(
+                axum::extract::State(state.clone()),
+                session_id,
+                remember,
+            )),
+            Json(json!({
+                "code": "profile",
+                "redirect_uri": redirect_uri,
+                "is_direct_login": true
+            })),
+        )
+            .into_response();
+    }
+
     let db_conn = match state.db_pool.get() {
         Ok(c) => c,
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
@@ -527,6 +604,7 @@ async fn login_handler(
                         session_id.clone(),
                         SessionData {
                             username: user.clone(),
+                            is_admin: false,
                             created_at: std::time::SystemTime::now(),
                         },
                     );
@@ -637,6 +715,7 @@ async fn login_handler(
                             session_id.clone(),
                             SessionData {
                                 username: user.clone(),
+                                is_admin: false,
                                 created_at: std::time::SystemTime::now(),
                             },
                         );
@@ -709,6 +788,7 @@ async fn login_handler(
                 session_id.clone(),
                 SessionData {
                     username: user.clone(),
+                    is_admin: false,
                     created_at: std::time::SystemTime::now(),
                 },
             );
@@ -747,9 +827,9 @@ async fn continue_handler(
         None => return Json(json!({"error": "会话已过期"})).into_response(),
     };
 
-    // 从session_store查询用户名
-    let user = match state.session_store.lock().unwrap().get(&session_id) {
-        Some(session) => session.username.clone(),
+    // 从session_store查询用户名及是否管理员会话
+    let (user, session_is_admin) = match state.session_store.lock().unwrap().get(&session_id) {
+        Some(session) => (session.username.clone(), session.is_admin),
         None => return Json(json!({"error": "会话已过期"})).into_response(),
     };
 
@@ -772,6 +852,22 @@ async fn continue_handler(
             .any(|pattern| redirect_matches(pattern, redirect_uri));
         if !redirect_ok {
             return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
+        }
+    }
+
+    // 管理员会话：仅允许用户中心（直接）登录，不允许 OAuth 授权
+    if session_is_admin {
+        if is_direct_login {
+            let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
+            return Json(json!({
+                "code": "profile",
+                "redirect_uri": redirect_uri,
+                "is_direct_login": true
+            }))
+            .into_response();
+        } else {
+            return Json(json!({"error": "管理员账户不允许OAuth授权"}))
+                .into_response();
         }
     }
 
@@ -863,17 +959,38 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
         }
     };
 
-    // 从session_store查询用户信息
-    let username = match state.session_store.lock().unwrap().get(&session_id) {
-        Some(session) => session.username.clone(),
-        None => {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "会话无效或已过期"})),
-            )
-                .into_response();
-        }
-    };
+    // 从session_store查询用户信息及是否管理员会话
+    let (username, session_is_admin) =
+        match state.session_store.lock().unwrap().get(&session_id) {
+            Some(session) => (session.username.clone(), session.is_admin),
+            None => {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "会话无效或已过期"})),
+                )
+                    .into_response();
+            }
+        };
+
+    // 管理员会话：返回管理员用户中心的专属信息
+    if session_is_admin {
+        return Json(json!({
+            "username": username,
+            "role": "admin",
+            "external_uid": "",
+            "full_name": "管理员",
+            "student_id": "",
+            "gender": "",
+            "last_login_time": null,
+            "state": 0,
+            "state_description": null,
+            "restriction_end_time": null,
+            "flag": 1,
+            "login_attempts": [],
+            "is_admin": true,
+        }))
+        .into_response();
+    }
 
     let conn = match state.db_pool.get() {
         Ok(c) => c,
@@ -919,6 +1036,222 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
     }
 }
 
+/// 从会话 Cookie 校验管理员身份。
+///
+/// 仅当会话是通过管理员密码验证登录（`is_admin == true`）时才放行，
+/// 返回管理员用户名；否则返回对应的 HTTP 错误响应。
+fn require_admin(state: &Arc<AppState>, jar: &CookieJar) -> Result<String, Response> {
+    let session_id = match jar.get("sso_session") {
+        Some(c) => c.value().to_string(),
+        None => {
+            return Err((axum::http::StatusCode::UNAUTHORIZED, Json(json!({"error":"未登录"}))).into_response());
+        }
+    };
+
+    let (username, is_admin) = {
+        let store = state.session_store.lock().unwrap();
+        match store.get(&session_id) {
+            Some(s) => (s.username.clone(), s.is_admin),
+            None => {
+                return Err((axum::http::StatusCode::UNAUTHORIZED, Json(json!({"error":"会话无效或已过期"}))).into_response());
+            }
+        }
+    };
+
+    if !is_admin {
+        return Err((axum::http::StatusCode::FORBIDDEN, Json(json!({"error":"需要管理员权限"}))).into_response());
+    }
+
+    Ok(username)
+}
+
+/// 查询用户列表（管理员）。
+///
+/// Query 参数：`keyword`（用户名/姓名/外部ID 模糊搜索）、`limit`、`offset`（分页）。
+async fn admin_users_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &jar) {
+        return resp;
+    }
+
+    let keyword = params.get("keyword").cloned().unwrap_or_default();
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50).clamp(1, 200);
+    let offset: i64 = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0).max(0);
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let users = match db::list_users(&conn, &keyword, limit, offset) {
+        Ok(u) => u,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let list: Vec<_> = users
+        .iter()
+        .map(|u| {
+            json!({
+                "uid": u.uid,
+                "username": u.username,
+                "role": u.role,
+                "external_uid": u.external_uid,
+                "full_name": u.full_name,
+                "student_id": u.student_id,
+                "gender": u.gender,
+                "flag": u.flag,
+                "state": u.state,
+                "state_description": u.state_description,
+                "restriction_end_time": u.restriction_end_time,
+                "last_login_time": u.last_login_time,
+                "failed_attempts": u.failed_attempts,
+            })
+        })
+        .collect();
+
+    Json(json!({ "users": list })).into_response()
+}
+
+/// 查询全量登录日志（管理员，跨所有用户）。
+///
+/// Query 参数：`keyword`（按用户名过滤）、`limit`、`offset`（分页）。
+async fn admin_logs_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &jar) {
+        return resp;
+    }
+
+    let keyword = params.get("keyword").cloned().unwrap_or_default();
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100).clamp(1, 500);
+    let offset: i64 = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0).max(0);
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let logs = match db::list_all_login_logs(&conn, &keyword, limit, offset) {
+        Ok(l) => l,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    Json(json!({ "logs": logs })).into_response()
+}
+
+/// 封禁用户（管理员）。
+///
+/// Body：`{ "reason": 可选原因, "duration_hours": 可选封禁时长（小时），0/缺省为永久 }`。
+async fn admin_ban_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Path(username): Path<String>,
+    Json(payload): Json<AdminBanRequest>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &jar) {
+        return resp;
+    }
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let user_info = match db::get_user_full_info(&conn, &username) {
+        Ok(Some(u)) => u,
+        _ => return Json(json!({"error": "用户不存在"})).into_response(),
+    };
+
+    let reason = payload.reason.unwrap_or_else(|| "管理员封禁".to_string());
+    let end_time = match payload.duration_hours {
+        Some(h) if h > 0 => (chrono::Utc::now() + chrono::Duration::hours(h)).to_rfc3339(),
+        _ => String::new(),
+    };
+
+    let description = if end_time.is_empty() {
+        format!("{}（永久封禁）", reason)
+    } else {
+        let end_local = chrono::DateTime::parse_from_rfc3339(&end_time)
+            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|_| end_time.clone());
+        format!("{}，解封时间 {}", reason, end_local)
+    };
+
+    if let Err(_) = db::set_user_state(&conn, &user_info.uid, UserState::Locked, &description, &end_time) {
+        return Json(json!({"error": "内部错误"})).into_response();
+    }
+
+    Json(json!({ "success": true, "message": format!("已封禁用户 {}", username) })).into_response()
+}
+
+/// 解封用户（管理员）。
+async fn admin_unban_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Path(username): Path<String>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &jar) {
+        return resp;
+    }
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let user_info = match db::get_user_full_info(&conn, &username) {
+        Ok(Some(u)) => u,
+        _ => return Json(json!({"error": "用户不存在"})).into_response(),
+    };
+
+    if let Err(_) = db::set_user_state(&conn, &user_info.uid, UserState::Normal, "", "") {
+        return Json(json!({"error": "内部错误"})).into_response();
+    }
+
+    Json(json!({ "success": true, "message": format!("已解封用户 {}", username) })).into_response()
+}
+
+/// 设置用户角色（管理员）。
+///
+/// Body：`{ "role": "user" | "admin" | ... }`。
+async fn admin_role_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Path(username): Path<String>,
+    Json(payload): Json<AdminRoleRequest>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &jar) {
+        return resp;
+    }
+
+    let role = payload.role.trim().to_string();
+    if role.is_empty() {
+        return Json(json!({"error": "角色不能为空"})).into_response();
+    }
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let user_info = match db::get_user_full_info(&conn, &username) {
+        Ok(Some(u)) => u,
+        _ => return Json(json!({"error": "用户不存在"})).into_response(),
+    };
+
+    if let Err(_) = db::set_user_role(&conn, &user_info.uid, &role) {
+        return Json(json!({"error": "内部错误"})).into_response();
+    }
+
+    Json(json!({ "success": true, "message": format!("已将 {} 的角色设置为 {}", username, role) }))
+        .into_response()
+}
+
 /// 判断给定的 redirect_uri 是否与配置中的某个条目匹配。
 ///
 /// - 若配置条目为纯字面量（不含正则元字符），则进行精确字符串比较（保持严格与向后兼容）；
@@ -949,6 +1282,13 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         .zip(b.bytes())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+/// 计算字符串的 SHA-256 摘要，以十六进制字符串形式返回。
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 async fn token_exchange_handler(
@@ -1571,6 +1911,21 @@ async fn main() {
             get(statics::login_page_handler),
         )
         .nest(&prefix, auth_router)
+        // 管理员 API（放在主路由、显式带 prefix）
+        .route(&format!("{prefix}/admin/api/users"), get(admin_users_handler))
+        .route(&format!("{prefix}/admin/api/logs"), get(admin_logs_handler))
+        .route(
+            &format!("{prefix}/admin/api/users/:username/ban"),
+            post(admin_ban_handler),
+        )
+        .route(
+            &format!("{prefix}/admin/api/users/:username/unban"),
+            post(admin_unban_handler),
+        )
+        .route(
+            &format!("{prefix}/admin/api/users/:username/role"),
+            post(admin_role_handler),
+        )
         // 固定路径不受 nest 影响
         .route(
             "/.well-known/openid-configuration",

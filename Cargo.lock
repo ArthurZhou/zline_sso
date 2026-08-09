@@ -2999,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "zline_sso"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -3020,6 +3020,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "time",
  "tokio",
  "toml",

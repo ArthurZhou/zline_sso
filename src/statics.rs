@@ -53,8 +53,23 @@ pub async fn login_page_handler(State(state): State<Arc<AppState>>, jar: CookieJ
 
 pub async fn profile_page_handler(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     // 检查cookie是否存在，实际验证由客户端在/auth/profile/api中程成
-    if jar.get("sso_session").is_none() {
-        return Redirect::to(&state.config.auth_path_prefix.to_string()).into_response();
+    let session_id = match jar.get("sso_session") {
+        Some(c) => c.value().to_string(),
+        None => return Redirect::to(&state.config.auth_path_prefix.to_string()).into_response(),
+    };
+
+    // 判断当前会话是否为管理员（需通过管理员密码验证登录，而非仅凭用户名）：
+    // 管理员用户名同时可能是普通进才账户，因此只有管理员会话才会将用户中心替换为 adminui
+    let is_admin = state
+        .session_store
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .map(|s| s.is_admin)
+        .unwrap_or(false);
+
+    if is_admin {
+        return serve_admin_page().await;
     }
 
     #[cfg(debug_assertions)]
@@ -71,6 +86,25 @@ pub async fn profile_page_handler(State(state): State<Arc<AppState>>, jar: Cooki
         // 发布模式：编译时嵌入，追求极致性能
         static HTML: &str = include_str!("../static/profile.html");
         Html(HTML).into_response()
+    }
+}
+
+/// 返回管理员用户中心（adminui）页面
+async fn serve_admin_page() -> Response {
+    #[cfg(debug_assertions)]
+    {
+        // 开发模式：实时读取文件，方便调试
+        match tokio::fs::read_to_string("frontend/admin.html").await {
+            Ok(html) => Html(html).into_response(),
+            Err(_) => (StatusCode::NOT_FOUND, "admin.html missing").into_response(),
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        // 发布模式：编译时嵌入，追求极致性能
+        static ADMIN_HTML: &str = include_str!("../static/admin.html");
+        Html(ADMIN_HTML).into_response()
     }
 }
 

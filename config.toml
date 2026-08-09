@@ -34,6 +34,15 @@ per_second = 20
 failed_attempts_threshold = 5
 lockout_duration_minutes = 30
 
+# 管理员账户（仅允许用户中心登录，不允许 OAuth 授权）
+# password_hash 为管理员密码的 SHA-256 十六进制摘要，生成方式：
+#   echo -n "你的密码" | sha256sum
+# 或 Python: python -c "import hashlib; print(hashlib.sha256(b'你的密码').hexdigest())"
+[admin]
+username = "320241141"
+# 默认密码为 "admin"，请务必修改
+password_hash = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+
 # 已注册 OIDC 客户端
 # redirect_uris 支持两种写法：
 #   1. 纯字面量：进行精确字符串匹配（如 "http://127.0.0.1:8080/callback"）
