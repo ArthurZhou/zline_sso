@@ -1,0 +1,54 @@
+# zline SSO 配置文件 (TOML)
+# 服务监听地址与端口
+host = "127.0.0.1"
+port = 8097
+
+# 发行方标识，用于 JWT `iss` 与发现文档
+issuer = "http://127.0.0.1:8097"
+
+# 业务路由前缀（登录页、各 OIDC 端点均挂载在该前缀下）
+auth_path_prefix = "/sso"
+
+# GeoIP MMDB 文件路径（缺失时仅日志告警，地理位置信息不可用）
+geoip_mmdb_path = "GeoLite2-City.mmdb"
+
+# 个人中心展示最近登录/尝试记录的时间窗口（天）
+login_record_window = 5
+
+# 允许跨域访问的来源（用于 CORS 响应头，形如 "http://host:port"）
+cors_allowed_origins = [
+    "http://127.0.0.1:8080",
+]
+
+# 前端登录负载 AES-256-GCM 共享密钥及允许的时钟偏差
+[frontend_crypto]
+shared_key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+max_clock_skew_secs = 300
+
+# 速率限制（burst 大小）
+[rate_limit]
+per_second = 20
+
+# 登录失败锁定策略
+[account_lockout]
+failed_attempts_threshold = 5
+lockout_duration_minutes = 30
+
+# 已注册 OIDC 客户端
+# redirect_uris 支持两种写法：
+#   1. 纯字面量：进行精确字符串匹配（如 "http://127.0.0.1:8080/callback"）
+#   2. 正则表达式：包含 * + ? ( ) [ ] { } ^ $ | \ 等元字符时按正则匹配
+#      （如 "^http://localhost:\\d+/callback$"）
+[[clients]]
+client_id = "test_client"
+client_secret = "test_client_secret"
+redirect_uris = [
+    "http://127.0.0.1:8080/callback",
+    "^http://localhost:\\d+/callback$",
+]
+return_extra_userinfo = [
+    "external_uid",
+    "full_name",
+    "student_id",
+    "gender",
+]

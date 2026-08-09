@@ -33,16 +33,24 @@
 
 ## 配置说明
 
-`config.json` 关键字段：
+`config.toml` 关键字段：
 
 | 字段 | 说明 |
 | --- | --- |
 | `issuer` | 发行方标识，用于 JWT `iss` 与发现文档 |
-| `auth_path_prefix` | 业务路由前缀 |
+| `auth_path_prefix` | 业务路由前缀（`{prefix}` 与 `{prefix}/` 均可用） |
 | `frontend_crypto.shared_key` | 前端登录负载 AES-256-GCM 共享密钥 |
 | `account_lockout` | 登录失败锁定策略 |
+| `cors_allowed_origins` | 允许跨域访问的来源列表（用于 CORS 响应头） |
 | `clients[]` | 已注册 OIDC 客户端 |
+| `clients[].redirect_uris` | 允许的回调地址列表，支持**字面量精确匹配**或**正则表达式** |
 | `clients[].return_extra_userinfo` | **UserInfo 返回字段白名单**（见下） |
+
+### `redirect_uris` 匹配规则
+
+`redirect_uris` 中的每个条目既可写纯字面量（如 `"http://127.0.0.1:8080/callback"`，进行精确字符串匹配），
+也可写正则表达式（条目包含 `* + ? ( ) [ ] { } ^ $ | \` 等元字符时按正则匹配，例如 `"^http://localhost:\\d+/callback$"`）。
+登录、`/continue` 与 `/token` 三个端点均按该规则校验，`/token` 中的 `redirect_uri` 不再要求与授权请求逐字节一致。
 
 ## OIDC 合规说明
 

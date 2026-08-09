@@ -34,7 +34,7 @@ def generate_oidc_client(name="alist_service"):
     }
 
     print("\n" + "="*50)
-    print("1. 请将以下内容复制到 config.json 的 'clients' 部分:")
+    print("1. 请将以下内容复制到 config.toml 的 'clients' 部分:")
     print("="*50)
     print(json.dumps({name: config_block}, indent=2))
 

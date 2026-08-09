@@ -8,7 +8,7 @@ from flask import Flask, request, session, redirect, url_for, render_template_st
 app = Flask(__name__)
 app.secret_key = "very_secret_key_123"
 
-# 配置信息（必须与 Rust 端 config.json 一致）
+# 配置信息（必须与 Rust 端 config.toml 一致）
 SSO_BASE_URL = "http://127.0.0.1:8097/sso"
 CLIENT_ID = "test_client"
 CLIENT_SECRET = "test_client_secret"

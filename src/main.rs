@@ -17,6 +17,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar};
 use base64::Engine;
 use base64::engine::general_purpose;
 use maxminddb::Reader;
+use regex::Regex;
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -30,7 +31,6 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
-use url::Url;
 use uuid::Uuid;
 
 // 会话 / 授权码 / GeoIP 缓存的有效期
@@ -49,6 +49,7 @@ struct Config {
     geoip_mmdb_path: String,
     frontend_crypto: CryptoConfig,
     account_lockout: AccountLockoutConfig,
+    cors_allowed_origins: Vec<String>,
     clients: Vec<ClientConfig>,
 }
 
@@ -120,10 +121,10 @@ struct IdTokenClaims {
     nonce: Option<String>,
 }
 
+#[derive(Clone)]
 struct AuthSession {
     username: String,
     client_id: String,
-    redirect_uri: String,
     nonce: Option<String>,
     created_at: SystemTime,
 }
@@ -416,13 +417,13 @@ async fn login_handler(
         if client.is_none() {
             return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
         }
-        // OIDC 要求 redirect_uri 精确匹配
-        if !client
+        // redirect_uri 校验：字面量精确匹配，或按配置的正则表达式匹配
+        let redirect_ok = client
             .unwrap()
             .redirect_uris
             .iter()
-            .any(|uri| redirect_uri == uri.as_str())
-        {
+            .any(|pattern| redirect_matches(pattern, redirect_uri));
+        if !redirect_ok {
             return Json(json!({"error": "OAuth重定向URI错误"})).into_response();
         }
     }
@@ -761,18 +762,15 @@ async fn continue_handler(
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
 
     if !is_direct_login {
-        let client = state
-            .config
-            .clients
+        let client = match state.config.clients.iter().find(|c| c.client_id == client_id) {
+            Some(c) => c,
+            None => return Json(json!({"error": "OAuth客户端ID错误"})).into_response(),
+        };
+        let redirect_ok = client
+            .redirect_uris
             .iter()
-            .find(|c| c.client_id == client_id);
-        if client.is_none()
-            || !client
-                .unwrap()
-                .redirect_uris
-                .iter()
-                .any(|uri| redirect_uri == uri.as_str())
-        {
+            .any(|pattern| redirect_matches(pattern, redirect_uri));
+        if !redirect_ok {
             return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
         }
     }
@@ -921,6 +919,27 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
     }
 }
 
+/// 判断给定的 redirect_uri 是否与配置中的某个条目匹配。
+///
+/// - 若配置条目为纯字面量（不含正则元字符），则进行精确字符串比较（保持严格与向后兼容）；
+/// - 否则将其作为正则表达式进行匹配，便于配置诸如 `^http://localhost:\d+/callback$` 的灵活规则。
+fn redirect_matches(pattern: &str, uri: &str) -> bool {
+    let is_regex = pattern.chars().any(|c| {
+        matches!(
+            c,
+            '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\'
+        )
+    });
+
+    if !is_regex {
+        return pattern == uri;
+    }
+
+    Regex::new(pattern)
+        .map(|re| re.is_match(uri))
+        .unwrap_or(false)
+}
+
 /// 恒定时间字符串比较，避免对 client_secret 的时序侧信道攻击。
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
@@ -972,37 +991,59 @@ async fn token_exchange_handler(
     };
 
     let mut store = state.code_store.lock().unwrap();
-    if let Some(session) = store.remove(&payload.code) {
-        if session.client_id != payload.client_id {
+    let session = match store.get(&payload.code) {
+        Some(session) => session.clone(),
+        None => {
             return Json(json!({
                 "error": "invalid_grant",
-                "error_description": "OAuth客户端ID错误"
+                "error_description": "OAuth授权码错误"
             }))
             .into_response();
         }
+    };
 
-        // 授权码有效期校验
-        if session
-            .created_at
-            .elapsed()
-            .map(|d| d > CODE_TTL)
-            .unwrap_or(false)
-        {
-            return Json(json!({
-                "error": "invalid_grant",
-                "error_description": "OAuth授权码已过期"
-            }))
-            .into_response();
-        }
+    if session.client_id != payload.client_id {
+        return Json(json!({
+            "error": "invalid_grant",
+            "error_description": "OAuth客户端ID错误"
+        }))
+        .into_response();
+    }
 
-        // redirect_uri 必须与授权请求时记录的完全一致（精确匹配）
-        if requested_redirect != &session.redirect_uri {
-            return Json(json!({
-                "error": "invalid_grant",
-                "error_description": "OAuth重定向URI错误"
-            }))
-            .into_response();
-        }
+    // 授权码有效期校验
+    if session
+        .created_at
+        .elapsed()
+        .map(|d| d > CODE_TTL)
+        .unwrap_or(false)
+    {
+        return Json(json!({
+            "error": "invalid_grant",
+            "error_description": "OAuth授权码已过期"
+        }))
+        .into_response();
+    }
+
+    // redirect_uri 校验：按该客户端配置的条目进行匹配（字面量精确匹配或正则匹配），
+    // 兼容授权请求时实际使用的 redirect_uri，避免过于严格的精确比较导致校验失败。
+    let redirect_ok = state
+        .config
+        .clients
+        .iter()
+        .find(|c| c.client_id == session.client_id)
+        .map(|c| {
+            c.redirect_uris
+                .iter()
+                .any(|pattern| redirect_matches(pattern, requested_redirect))
+        })
+        .unwrap_or(false);
+    if !redirect_ok {
+        return Json(json!({
+            "error": "invalid_grant",
+            "error_description": "OAuth重定向URI错误"
+        }))
+        .into_response();
+    }
 
         let now = chrono::Utc::now().timestamp() as usize;
 
@@ -1060,6 +1101,10 @@ async fn token_exchange_handler(
             "Token 签发成功"
         );
 
+        // 仅在校验全部通过并成功签发 Token 后消费授权码，
+        // 避免校验失败时误删除授权码，导致客户端重试时报“OAuth授权码错误”。
+        store.remove(&payload.code);
+
         Json(json!({
             "access_token": access_token,
             "token_type": "Bearer",
@@ -1068,13 +1113,6 @@ async fn token_exchange_handler(
             "scope": "openid profile"
         }))
         .into_response()
-    } else {
-        Json(json!({
-            "error": "invalid_grant",
-            "error_description": "OAuth授权码错误"
-        }))
-        .into_response()
-    }
 }
 
 async fn userinfo_handler(
@@ -1374,7 +1412,6 @@ fn handle_login_response(
             AuthSession {
                 username,
                 client_id,
-                redirect_uri: redirect_uri.clone(),
                 nonce: nonce.clone(),
                 created_at: SystemTime::now(),
             },
@@ -1449,9 +1486,9 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let config_str = fs::read_to_string("config.json").expect("config.json not found");
+    let config_str = fs::read_to_string("config.toml").expect("config.toml not found");
     let mut config: Config =
-        serde_json::from_str(&config_str).expect("Failed to parse config.json");
+        toml::from_str(&config_str).expect("Failed to parse config.toml");
     if config.issuer.ends_with('/') {
         config.issuer.pop();
     }
@@ -1466,22 +1503,12 @@ async fn main() {
     let state = init_app_state(config.clone());
     let prefix = state.config.auth_path_prefix.clone();
 
-    // 仅允许已注册客户端来源的 CORS（由 redirect_uris 推导 origin）
+    // 仅允许已注册客户端来源的 CORS（由配置的 cors_allowed_origins 指定）
     let allowed_origins: Vec<HeaderValue> = state
         .config
-        .clients
+        .cors_allowed_origins
         .iter()
-        .flat_map(|c| c.redirect_uris.iter())
-        .filter_map(|uri| Url::parse(uri).ok())
-        .filter_map(|u| {
-            let scheme = u.scheme().to_string();
-            let host = u.host_str()?.to_string();
-            let origin = match u.port() {
-                Some(p) => format!("{scheme}://{host}:{p}"),
-                None => format!("{scheme}://{host}"),
-            };
-            HeaderValue::from_str(&origin).ok()
-        })
+        .filter_map(|origin| HeaderValue::from_str(origin).ok())
         .collect();
 
     // 定期清理过期会话/授权码/GeoIP 缓存，防止内存无界增长
@@ -1537,8 +1564,12 @@ async fn main() {
             }),
         )
         // 使用 nest 挂载业务路由
-        // Axum 的 nest 会自动处理不带斜杠的访问（如果子路由有 "/"）
-        // 但为了彻底消除重复定义的冲突，我们只在这里 nest
+        // Axum 的 nest 在路径不带斜杠时只匹配 {prefix}（不匹配 {prefix}/），
+        // 因此这里显式补充 {prefix}/ 路由，使两种写法都能访问登录页。
+        .route(
+            &format!("{prefix}/"),
+            get(statics::login_page_handler),
+        )
         .nest(&prefix, auth_router)
         // 固定路径不受 nest 影响
         .route(
