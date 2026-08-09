@@ -190,6 +190,9 @@
                     if (data.state) {
                         target += `&state=${encodeURIComponent(data.state)}`;
                     }
+                    if (data.nonce) {
+                        target += `&nonce=${encodeURIComponent(data.nonce)}`;
+                    }
                     
                     window.location.href = target;
                     // ------------------------------

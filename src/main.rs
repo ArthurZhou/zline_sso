@@ -9,12 +9,14 @@ use aes_gcm::{
 use axum::{
     Form, Router,
     extract::{ConnectInfo, Query, State},
+    http::header::HeaderValue,
     response::{IntoResponse, Json, Redirect, Response},
     routing::{get, post},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use base64::Engine;
 use base64::engine::general_purpose;
+use maxminddb::Reader;
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -22,11 +24,19 @@ use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
-use maxminddb::Reader;
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tracing::{error, info, warn};
+use url::Url;
 use uuid::Uuid;
+
+// 会话 / 授权码 / GeoIP 缓存的有效期
+const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 3600); // 会话 7 天
+const CODE_TTL: Duration = Duration::from_secs(300); // 授权码 5 分钟
+const GEOIP_CACHE_MAX: usize = 10_000;
 
 #[derive(Deserialize, Clone)]
 struct Config {
@@ -73,17 +83,21 @@ struct LoginRequest {
     client_id: Option<String>,
     redirect_uri: Option<String>,
     state: Option<String>,
+    nonce: Option<String>,
     remember: Option<bool>,
     sync_info: Option<bool>,
 }
 
 #[derive(Deserialize)]
 struct TokenExchangeRequest {
+    grant_type: String,
     code: String,
+    redirect_uri: Option<String>,
     client_id: String,
     client_secret: String,
 }
 
+/// Access Token 声明（携带者令牌，用于 userinfo 端点）
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     iss: String,
@@ -93,9 +107,25 @@ struct Claims {
     iat: usize,
 }
 
+/// ID Token 声明（OIDC 标准声明，必须包含 nonce 以绑定授权请求）
+#[derive(Debug, Serialize, Deserialize)]
+struct IdTokenClaims {
+    iss: String,
+    sub: String,
+    aud: String,
+    azp: Option<String>,
+    exp: usize,
+    iat: usize,
+    auth_time: usize,
+    nonce: Option<String>,
+}
+
 struct AuthSession {
     username: String,
     client_id: String,
+    redirect_uri: String,
+    nonce: Option<String>,
+    created_at: SystemTime,
 }
 
 struct SessionData {
@@ -143,78 +173,103 @@ impl AppState {
     }
 
     fn resolve_geo_location(&self, ip: &str) -> GeoLocation {
-    let default_unknown = GeoLocation {
-        country: "未知".to_string(),
-        region: "未知".to_string(),
-    };
+        let default_unknown = GeoLocation {
+            country: "未知".to_string(),
+            region: "未知".to_string(),
+        };
 
-    let lan_location = GeoLocation {
-        country: "局域网".to_string(),
-        region: "局域网".to_string(),
-    };
+        let lan_location = GeoLocation {
+            country: "局域网".to_string(),
+            region: "局域网".to_string(),
+        };
 
-    // 1. 解析 IP 字符串
-    let ip_addr: IpAddr = match ip.parse() {
-        Ok(addr) => addr,
-        Err(_) => return default_unknown,
-    };
+        // 1. 解析 IP 字符串
+        let ip_addr: IpAddr = match ip.parse() {
+            Ok(addr) => addr,
+            Err(_) => return default_unknown,
+        };
 
-    // 2. 识别内网/私有地址
-    if AppState::is_lan(ip_addr) {
-        return lan_location;
+        // 2. 识别内网/私有地址
+        if AppState::is_lan(ip_addr) {
+            return lan_location;
+        }
+
+        // 3. 检查 Reader 是否可用
+        let reader = match self.geoip_reader.as_ref() {
+            Some(reader) => reader,
+            None => return default_unknown,
+        };
+
+        // 4. 查询 MMDB
+        let data: serde_json::Value = match reader.lookup(ip_addr) {
+            Ok(d) => d,
+            Err(_) => return default_unknown,
+        };
+
+        // 5. 提取国家 (优先中文)
+        let country = data
+            .get("country")
+            .and_then(|c| c.get("names"))
+            .or_else(|| {
+                data.get("registered_country")
+                    .and_then(|rc| rc.get("names"))
+            })
+            .and_then(|n| n.get("zh-CN").or(n.get("en")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "未知".to_string());
+
+        // 6. 提取地区 (优先中文)
+        let region = data
+            .get("subdivisions")
+            .and_then(|s| s.as_array())
+            .and_then(|a| a.first())
+            .and_then(|f| f.get("names"))
+            .or_else(|| data.get("city").and_then(|c| c.get("names")))
+            .and_then(|n| n.get("zh-CN").or(n.get("en")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "未知".to_string());
+
+        GeoLocation { country, region }
     }
 
-    // 3. 检查 Reader 是否可用
-    let reader = match self.geoip_reader.as_ref() {
-        Some(reader) => reader,
-        None => return default_unknown,
-    };
-
-    // 4. 查询 MMDB
-    let data: serde_json::Value = match reader.lookup(ip_addr) {
-        Ok(d) => d,
-        Err(_) => return default_unknown,
-    };
-
-    // 5. 提取国家 (优先中文)
-    let country = data.get("country")
-        .and_then(|c| c.get("names"))
-        .or_else(|| data.get("registered_country").and_then(|rc| rc.get("names")))
-        .and_then(|n| n.get("zh-CN").or(n.get("en")))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "未知".to_string());
-
-    // 6. 提取地区 (优先中文)
-    let region = data.get("subdivisions")
-        .and_then(|s| s.as_array())
-        .and_then(|a| a.first())
-        .and_then(|f| f.get("names"))
-        .or_else(|| data.get("city").and_then(|c| c.get("names")))
-        .and_then(|n| n.get("zh-CN").or(n.get("en")))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "未知".to_string());
-
-    GeoLocation { country, region }
-}
-
-/// 辅助函数：判断 IP 是否属于局域网或保留地址
-fn is_lan(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || // 127.0.0.1
-            v4.is_private() ||  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            v4.is_link_local()  // 169.254.0.0/16
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback() || // ::1
-            // 检查是否为唯一本地地址 (fc00::/7) 或 链路本地地址 (fe80::/10)
-            (v6.segments()[0] & 0xfe00) == 0xfc00 || 
-            (v6.segments()[0] & 0xffc0) == 0xfe80
+    /// 辅助函数：判断 IP 是否属于局域网或保留地址
+    fn is_lan(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback() || // 127.0.0.1
+                v4.is_private() ||  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                v4.is_link_local() // 169.254.0.0/16
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback() || // ::1
+                // 检查是否为唯一本地地址 (fc00::/7) 或 链路本地地址 (fe80::/10)
+                (v6.segments()[0] & 0xfe00) == 0xfc00 ||
+                (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
         }
     }
-}
+
+    /// 定期清理过期的会话、授权码与过大的 GeoIP 缓存，防止内存无界增长。
+    fn cleanup_expired(&self) {
+        self.session_store.lock().unwrap().retain(|_, s| {
+            s.created_at
+                .elapsed()
+                .map(|d| d < SESSION_TTL)
+                .unwrap_or(true)
+        });
+
+        self.code_store
+            .lock()
+            .unwrap()
+            .retain(|_, c| c.created_at.elapsed().map(|d| d < CODE_TTL).unwrap_or(true));
+
+        let mut geoip = self.geoip_cache.lock().unwrap();
+        if geoip.len() > GEOIP_CACHE_MAX {
+            geoip.clear();
+        }
+    }
 }
 
 #[derive(PartialEq, Default)]
@@ -272,28 +327,36 @@ fn extract_client_ip(
     headers: &axum::http::HeaderMap,
     socket_addr: Option<std::net::SocketAddr>,
 ) -> String {
-    // 检查 X-Forwarded-For 头（nginx 转发）
-    if let Some(forwarded_header) = headers.get("x-forwarded-for") {
-        if let Ok(forwarded) = forwarded_header.to_str() {
-            // X-Forwarded-For 可能包含多个 IP，取第一个（原始客户端 IP）
-            if let Some(ip) = forwarded.split(',').next() {
-                return ip.trim().to_string();
+    // 仅当直接连接来自可信（局域网/回环）代理时才信任转发头，
+    // 否则攻击者可通过伪造 X-Forwarded-For 污染审计日志与地理位置
+    let peer_is_trusted = socket_addr
+        .map(|addr| AppState::is_lan(addr.ip()))
+        .unwrap_or(false);
+
+    if peer_is_trusted {
+        // 检查 X-Forwarded-For 头（nginx 转发）
+        if let Some(forwarded_header) = headers.get("x-forwarded-for") {
+            if let Ok(forwarded) = forwarded_header.to_str() {
+                // X-Forwarded-For 可能包含多个 IP，取第一个（原始客户端 IP）
+                if let Some(ip) = forwarded.split(',').next() {
+                    return ip.trim().to_string();
+                }
+            }
+        }
+
+        // 检查 X-Real-IP 头（某些 nginx 配置）
+        if let Some(real_ip_header) = headers.get("x-real-ip") {
+            if let Ok(real_ip) = real_ip_header.to_str() {
+                return real_ip.to_string();
             }
         }
     }
 
-    // 检查 X-Real-IP 头（某些 nginx 配置）
-    if let Some(real_ip_header) = headers.get("x-real-ip") {
-        if let Ok(real_ip) = real_ip_header.to_str() {
-            return real_ip.to_string();
-        }
-    }
-
     // 使用直接连接地址
-    socket_addr.map(|addr| addr.ip().to_string()).unwrap_or_else(|| "-1".to_string())
+    socket_addr
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "-1".to_string())
 }
-
-// ============ HTTP 处理器 ============
 
 async fn logout_handler(
     State(state): State<Arc<AppState>>,
@@ -302,7 +365,11 @@ async fn logout_handler(
 ) -> impl IntoResponse {
     // 如果有session cookie，从session_store中删除
     if let Some(session_cookie) = jar.get("sso_session") {
-        state.session_store.lock().unwrap().remove(session_cookie.value());
+        state
+            .session_store
+            .lock()
+            .unwrap()
+            .remove(session_cookie.value());
     }
 
     let query_str = serde_urlencoded::to_string(&params).unwrap_or_default();
@@ -330,18 +397,32 @@ async fn login_handler(
     let client_ip = extract_client_ip(&headers, Some(socket_addr));
     let geo_location = state.lookup_geo_location(&client_ip);
     let client_id = payload.client_id.as_ref().map(|s| s.as_str()).unwrap_or("");
-    let redirect_uri = payload.redirect_uri.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let redirect_uri = payload
+        .redirect_uri
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
     let mut sync_info = payload.sync_info.unwrap_or_default();
     let mut new_user_record = false;
 
     // 带参数，即从外部app发起验证时，验证 OAuth 参数
     if !is_direct_login {
-        let client = state.config.clients.iter().find(|c| c.client_id == client_id);
+        let client = state
+            .config
+            .clients
+            .iter()
+            .find(|c| c.client_id == client_id);
         if client.is_none() {
             return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
         }
-        if !client.unwrap().redirect_uris.iter().any(|uri| redirect_uri.starts_with(uri)) {
+        // OIDC 要求 redirect_uri 精确匹配
+        if !client
+            .unwrap()
+            .redirect_uris
+            .iter()
+            .any(|uri| redirect_uri == uri.as_str())
+        {
             return Json(json!({"error": "OAuth重定向URI错误"})).into_response();
         }
     }
@@ -413,11 +494,15 @@ async fn login_handler(
                     if sync_info {
                         // 获取外部用户信息
                         let (xuid, xuxm, student_id, gender) =
-                            zline::get_external_user_info(&external_cookie)
+                            zline::get_external_user_info(&state.http_client, &external_cookie)
                                 .await
                                 .unwrap_or_default();
-                        db::set_user_flag(&db_conn, &user_info.uid, UserFlag::Normal).ok();
-                        db::upsert_user(&db_conn, &user, &xuid, &xuxm, &student_id, &gender).ok();
+                        // 仅在取得非空数据时才覆盖本地信息，避免清空已有资料
+                        if !xuid.is_empty() || !xuxm.is_empty() {
+                            db::set_user_flag(&db_conn, &user_info.uid, UserFlag::Normal).ok();
+                            db::upsert_user(&db_conn, &user, &xuid, &xuxm, &student_id, &gender)
+                                .ok();
+                        }
                     }
                     db::record_login_success(
                         &db_conn,
@@ -427,6 +512,13 @@ async fn login_handler(
                         &geo_location.region,
                     )
                     .ok();
+
+                    info!(
+                        username = %user,
+                        client_id = %client_id,
+                        ip = %client_ip,
+                        "登录成功"
+                    );
 
                     // 生成session ID并存储用户信息
                     let session_id = Uuid::new_v4().to_string();
@@ -440,13 +532,18 @@ async fn login_handler(
 
                     // 验证成功，生成登录响应
                     return (
-                        jar.add(create_sso_cookie(axum::extract::State(state.clone()), session_id, remember)),
+                        jar.add(create_sso_cookie(
+                            axum::extract::State(state.clone()),
+                            session_id,
+                            remember,
+                        )),
                         handle_login_response(
                             &state,
                             user,
                             client_id.to_string(),
                             redirect_uri.to_string(),
                             payload.state,
+                            payload.nonce,
                             is_direct_login,
                         ),
                     )
@@ -465,6 +562,13 @@ async fn login_handler(
                         &geo_location.region,
                     )
                     .ok();
+
+                    warn!(
+                        username = %user,
+                        ip = %client_ip,
+                        failed_attempts = user_info.failed_attempts + 1,
+                        "登录失败"
+                    );
 
                     // 检查是否应该锁定账户
                     if user_info.failed_attempts + 1
@@ -502,17 +606,20 @@ async fn login_handler(
                         if sync_info {
                             // 获取外部用户信息
                             let (xuid, xuxm, student_id, gender) =
-                                zline::get_external_user_info(&external_cookie)
+                                zline::get_external_user_info(&state.http_client, &external_cookie)
                                     .await
                                     .unwrap_or_default();
-                            let _ = db::upsert_user(
-                                &db_conn,
-                                &user,
-                                &xuid,
-                                &xuxm,
-                                &student_id,
-                                &gender,
-                            );
+                            // 仅在取得非空数据时才覆盖本地信息，避免清空已有资料
+                            if !xuid.is_empty() || !xuxm.is_empty() {
+                                let _ = db::upsert_user(
+                                    &db_conn,
+                                    &user,
+                                    &xuid,
+                                    &xuxm,
+                                    &student_id,
+                                    &gender,
+                                );
+                            }
                         }
                         db::record_login_success(
                             &db_conn,
@@ -536,7 +643,11 @@ async fn login_handler(
                         // 允许进入个人中心
                         let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
                         return (
-                            jar.add(create_sso_cookie(axum::extract::State(state), session_id, remember)),
+                            jar.add(create_sso_cookie(
+                                axum::extract::State(state),
+                                session_id,
+                                remember,
+                            )),
                             Json(json!({
                                 "code": "profile",
                                 "redirect_uri": redirect_uri,
@@ -570,7 +681,7 @@ async fn login_handler(
                                 UserState::Locked,
                                 &format!(
                                     "账户由于登录失败 {} 次已被锁定，将在 {} 自动解封",
-                                    user_info.failed_attempts,
+                                    user_info.failed_attempts + 1,
                                     lockout_end.format("%Y-%m-%d %H:%M:%S")
                                 ),
                                 &lockout_end.to_rfc3339(),
@@ -601,13 +712,18 @@ async fn login_handler(
                 },
             );
             return (
-                jar.add(create_sso_cookie(axum::extract::State(state.clone()), session_id, remember)),
+                jar.add(create_sso_cookie(
+                    axum::extract::State(state.clone()),
+                    session_id,
+                    remember,
+                )),
                 handle_login_response(
                     &state,
                     user,
                     client_id.to_string(),
                     redirect_uri.to_string(),
                     payload.state,
+                    payload.nonce,
                     is_direct_login,
                 ),
             )
@@ -637,13 +753,25 @@ async fn continue_handler(
     };
 
     let client_id = payload.client_id.as_ref().map(|s| s.as_str()).unwrap_or("");
-    let redirect_uri = payload.redirect_uri.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let redirect_uri = payload
+        .redirect_uri
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let is_direct_login = client_id.is_empty(); // 是否不带参数访问登录页面,即进入个人中心
 
     if !is_direct_login {
-        let client = state.config.clients.iter().find(|c| c.client_id == client_id);
+        let client = state
+            .config
+            .clients
+            .iter()
+            .find(|c| c.client_id == client_id);
         if client.is_none()
-            || !client.unwrap().redirect_uris.iter().any(|uri| redirect_uri.starts_with(uri))
+            || !client
+                .unwrap()
+                .redirect_uris
+                .iter()
+                .any(|uri| redirect_uri == uri.as_str())
         {
             return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
         }
@@ -687,6 +815,7 @@ async fn continue_handler(
                     client_id.to_string(),
                     redirect_uri.to_string(),
                     payload.state,
+                    payload.nonce,
                     is_direct_login,
                 );
             } else {
@@ -755,8 +884,12 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
 
     match db::get_user_full_info(&conn, &username) {
         Ok(Some(user_info)) => {
-            let login_attempts =
-                db::get_recent_login_attempts(&conn, &user_info.uid, state.config.login_record_window).unwrap_or_default();
+            let login_attempts = db::get_recent_login_attempts(
+                &conn,
+                &user_info.uid,
+                state.config.login_record_window,
+            )
+            .unwrap_or_default();
             Json(json!({
                 "username": user_info.username,
                 "role": user_info.role,
@@ -773,18 +906,8 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
             }))
             .into_response()
         }
-        Ok(None) => Json(json!({
-            "username": username,
-            "role": "user",
-            "external_uid": "",
-            "full_name": "",
-            "state": 0,
-            "state_description": null,
-            "flag": 0,
-            "login_attempts": [],
-        }))
-        .into_response(),
-        Err(_) => Json(json!({
+        // 用户不存在或查询失败时返回默认信息
+        _ => Json(json!({
             "username": username,
             "role": "user",
             "external_uid": "",
@@ -798,34 +921,90 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
     }
 }
 
+/// 恒定时间字符串比较，避免对 client_secret 的时序侧信道攻击。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 async fn token_exchange_handler(
     State(state): State<Arc<AppState>>,
     Form(payload): Form<TokenExchangeRequest>,
 ) -> Response {
-    let is_valid = state
-        .config
-        .clients
-        .iter()
-        .any(|c| c.client_id == payload.client_id && c.client_secret == payload.client_secret);
-
-    if !is_valid {
-        return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
+    // OIDC token 端点必须校验 grant_type 为 authorization_code
+    if payload.grant_type != "authorization_code" {
+        return Json(json!({
+            "error": "unsupported_grant_type",
+            "error_description": "仅支持 authorization_code 授权类型"
+        }))
+        .into_response();
     }
+
+    // 校验 client 凭据（secret 使用恒定时间比较，避免时序侧信道）
+    let client_ok = state.config.clients.iter().any(|c| {
+        c.client_id == payload.client_id
+            && constant_time_eq(&c.client_secret, &payload.client_secret)
+    });
+
+    if !client_ok {
+        return Json(json!({
+            "error": "invalid_client",
+            "error_description": "OAuth客户端ID错误"
+        }))
+        .into_response();
+    }
+
+    // OIDC 要求在 token 请求中携带 redirect_uri，且必须与授权请求时一致
+    let requested_redirect = match &payload.redirect_uri {
+        Some(uri) => uri,
+        None => {
+            return Json(json!({
+                "error": "invalid_grant",
+                "error_description": "缺少 redirect_uri"
+            }))
+            .into_response();
+        }
+    };
 
     let mut store = state.code_store.lock().unwrap();
     if let Some(session) = store.remove(&payload.code) {
         if session.client_id != payload.client_id {
-            return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
+            return Json(json!({
+                "error": "invalid_grant",
+                "error_description": "OAuth客户端ID错误"
+            }))
+            .into_response();
+        }
+
+        // 授权码有效期校验
+        if session
+            .created_at
+            .elapsed()
+            .map(|d| d > CODE_TTL)
+            .unwrap_or(false)
+        {
+            return Json(json!({
+                "error": "invalid_grant",
+                "error_description": "OAuth授权码已过期"
+            }))
+            .into_response();
+        }
+
+        // redirect_uri 必须与授权请求时记录的完全一致（精确匹配）
+        if requested_redirect != &session.redirect_uri {
+            return Json(json!({
+                "error": "invalid_grant",
+                "error_description": "OAuth重定向URI错误"
+            }))
+            .into_response();
         }
 
         let now = chrono::Utc::now().timestamp() as usize;
-        let claims = Claims {
-            iss: state.config.issuer.clone(),
-            sub: session.username,
-            aud: payload.client_id.clone(),
-            iat: now,
-            exp: now + 3600,
-        };
 
         let keys = state.keys.read().unwrap();
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
@@ -839,21 +1018,62 @@ async fn token_exchange_handler(
 
         let encoding_key = match jsonwebtoken::EncodingKey::from_rsa_pem(&pem_bytes) {
             Ok(key) => key,
-            Err(_) => return Json(json!({"error": "密钥错误"})).into_response(),
+            Err(err) => {
+                error!(error = %err, "Token 签发失败：无法解析 RSA 私钥");
+                return Json(json!({"error": "内部错误"})).into_response();
+            }
         };
 
-        match jsonwebtoken::encode(&header, &claims, &encoding_key) {
-            Ok(token) => Json(json!({
-                "access_token": token,
-                "id_token": token,
-                "token_type": "Bearer",
-                "expires_in": 3600
-            }))
-            .into_response(),
-            Err(_) => Json(json!({"error": "密钥错误"})).into_response(),
-        }
+        // Access Token：携带者令牌，用于 userinfo 端点
+        let access_claims = Claims {
+            iss: state.config.issuer.clone(),
+            sub: session.username.clone(),
+            aud: payload.client_id.clone(),
+            iat: now,
+            exp: now + 3600,
+        };
+
+        // ID Token：与 access_token 分离，且必须携带 nonce（若授权请求提供了 nonce）
+        let id_claims = IdTokenClaims {
+            iss: state.config.issuer.clone(),
+            sub: session.username.clone(),
+            aud: payload.client_id.clone(),
+            azp: Some(payload.client_id.clone()),
+            iat: now,
+            auth_time: now,
+            exp: now + 3600,
+            nonce: session.nonce.clone(),
+        };
+
+        let access_token = match jsonwebtoken::encode(&header, &access_claims, &encoding_key) {
+            Ok(t) => t,
+            Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+        };
+        let id_token = match jsonwebtoken::encode(&header, &id_claims, &encoding_key) {
+            Ok(t) => t,
+            Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+        };
+
+        info!(
+            username = %session.username,
+            client_id = %payload.client_id,
+            "Token 签发成功"
+        );
+
+        Json(json!({
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "id_token": id_token,
+            "scope": "openid profile"
+        }))
+        .into_response()
     } else {
-        Json(json!({"error": "OAuth授权码错误"})).into_response()
+        Json(json!({
+            "error": "invalid_grant",
+            "error_description": "OAuth授权码错误"
+        }))
+        .into_response()
     }
 }
 
@@ -883,7 +1103,8 @@ async fn userinfo_handler(
     };
 
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-    validation.validate_aud = false;
+    validation.validate_aud = false; // aud 为各客户端 client_id，解码后单独校验
+    validation.set_issuer(&[state.config.issuer.clone()]);
 
     match jsonwebtoken::decode::<Claims>(token_str.unwrap(), &decoding_key, &validation) {
         Ok(token_data) => {
@@ -913,14 +1134,19 @@ async fn userinfo_handler(
                     ),
                 };
 
+            // 基础 OIDC 声明：sub 与由 sub 派生的 preferred_username
             let mut resp_data = json!({
                 "sub": username,
                 "preferred_username": username,
-                "role": role,
             });
 
-            if let Some(client_conf) =
-                state.config.clients.iter().find(|c| &c.client_id == client_id)
+            // 其余字段（含 role）严格遵循服务端 return_extra_userinfo 配置，
+            // 未配置的字段一律不允许返回，防止超出授权范围泄露信息
+            if let Some(client_conf) = state
+                .config
+                .clients
+                .iter()
+                .find(|c| &c.client_id == client_id)
             {
                 for field in &client_conf.return_extra_userinfo {
                     match field.as_str() {
@@ -928,14 +1154,24 @@ async fn userinfo_handler(
                         "full_name" => resp_data["full_name"] = json!(xuxm),
                         "student_id" => resp_data["student_id"] = json!(student_id),
                         "gender" => resp_data["gender"] = json!(gender),
+                        "role" => resp_data["role"] = json!(role),
                         _ => {}
                     }
                 }
             }
 
+            info!(
+                username = %username,
+                client_id = %client_id,
+                "UserInfo 访问成功"
+            );
+
             Json(resp_data).into_response()
         }
-        Err(_) => Json(json!({"error": "授权码错误"})).into_response(),
+        Err(err) => {
+            error!(error = %err, "UserInfo 访问失败：Token 校验失败");
+            Json(json!({"error": "授权码错误"})).into_response()
+        }
     }
 }
 
@@ -973,7 +1209,29 @@ async fn oidc_config_handler(State(state): State<Arc<AppState>>) -> Response {
         "userinfo_endpoint": format!("{}{}/userinfo", issuer, prefix),
         "jwks_uri": format!("{}{}/jwks", issuer, prefix),
         "response_types_supported": ["code"],
-        "id_token_signing_alg_values_supported": ["RS256"]
+        "response_modes_supported": ["query"],
+        "grant_types_supported": ["authorization_code"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post"],
+        "code_challenge_methods_supported": [],
+        "scopes_supported": ["openid", "profile"],
+        "claims_supported": [
+            "sub",
+            "iss",
+            "aud",
+            "exp",
+            "iat",
+            "auth_time",
+            "azp",
+            "nonce",
+            "preferred_username",
+            "external_uid",
+            "full_name",
+            "student_id",
+            "gender",
+            "role"
+        ]
     }))
     .into_response()
 }
@@ -1020,7 +1278,9 @@ fn decrypt_frontend_payload(
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);
 
-    let enc_data = general_purpose::STANDARD.decode(payload_b64).map_err(|_| "Base64解码失败")?;
+    let enc_data = general_purpose::STANDARD
+        .decode(payload_b64)
+        .map_err(|_| "Base64解码失败")?;
 
     if enc_data.len() < 12 + 16 {
         return Err("负载长度无效".into());
@@ -1060,7 +1320,11 @@ fn decrypt_frontend_payload(
 ///
 /// # 返回值
 /// 返回构建好的Cookie，可直接用于HTTP响应
-fn create_sso_cookie(State(state): State<Arc<AppState>>, session_id: String, remember: bool) -> Cookie<'static> {
+fn create_sso_cookie(
+    State(state): State<Arc<AppState>>,
+    session_id: String,
+    remember: bool,
+) -> Cookie<'static> {
     let mut builder = Cookie::build(("sso_session", session_id))
         .path(state.config.auth_path_prefix.clone())
         .http_only(true)
@@ -1099,23 +1363,28 @@ fn handle_login_response(
     client_id: String,
     redirect_uri: String,
     oauth_state: Option<String>,
+    nonce: Option<String>,
     is_direct_login: bool,
 ) -> Response {
     if !is_direct_login {
-        // 常规登录
+        // 常规登录：生成授权码，并记录其关联的 redirect_uri、nonce 与创建时间
         let code = Uuid::new_v4().to_string();
         state.code_store.lock().unwrap().insert(
             code.clone(),
             AuthSession {
                 username,
                 client_id,
+                redirect_uri: redirect_uri.clone(),
+                nonce: nonce.clone(),
+                created_at: SystemTime::now(),
             },
         );
 
         Json(json!({
             "code": code,
             "redirect_uri": redirect_uri,
-            "state": oauth_state
+            "state": oauth_state,
+            "nonce": nonce
         }))
         .into_response()
     } else {
@@ -1146,9 +1415,9 @@ fn init_app_state(config: Config) -> Arc<AppState> {
     let geoip_reader = match Reader::open_readfile(&config.geoip_mmdb_path) {
         Ok(reader) => Some(Arc::new(reader)),
         Err(err) => {
-            eprintln!(
-                "Warning: failed to open geoip mmdb file '{}': {}",
-                config.geoip_mmdb_path, err
+            warn!(
+                path = %config.geoip_mmdb_path, error = %err,
+                "无法打开 GeoIP MMDB 文件，地理位置信息将不可用"
             );
             None
         }
@@ -1156,7 +1425,10 @@ fn init_app_state(config: Config) -> Arc<AppState> {
 
     Arc::new(AppState {
         config: config.clone(),
-        http_client: reqwest::Client::builder().cookie_store(true).build().unwrap(),
+        http_client: reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .unwrap(),
         keys: RwLock::new(Arc::new((private_key, kid))),
         code_store: Mutex::new(HashMap::new()),
         session_store: Mutex::new(HashMap::new()),
@@ -1168,20 +1440,61 @@ fn init_app_state(config: Config) -> Arc<AppState> {
 
 #[tokio::main]
 async fn main() {
+    // 初始化结构化日志：级别可通过 RUST_LOG 环境变量覆盖（默认 info）
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
+
     let config_str = fs::read_to_string("config.json").expect("config.json not found");
     let mut config: Config =
         serde_json::from_str(&config_str).expect("Failed to parse config.json");
     if config.issuer.ends_with('/') {
         config.issuer.pop();
     }
+    info!(issuer = %config.issuer, host = %config.host, port = config.port,
+        "配置文件加载完成");
 
     // 预加载 students CSV 到内存缓存
     if let Err(e) = zline::load_csv_cache("students_data.csv") {
-        eprintln!("Warning: failed to load students_data.csv: {}", e);
+        warn!("failed to load students_data.csv: {}", e);
     }
 
     let state = init_app_state(config.clone());
     let prefix = state.config.auth_path_prefix.clone();
+
+    // 仅允许已注册客户端来源的 CORS（由 redirect_uris 推导 origin）
+    let allowed_origins: Vec<HeaderValue> = state
+        .config
+        .clients
+        .iter()
+        .flat_map(|c| c.redirect_uris.iter())
+        .filter_map(|uri| Url::parse(uri).ok())
+        .filter_map(|u| {
+            let scheme = u.scheme().to_string();
+            let host = u.host_str()?.to_string();
+            let origin = match u.port() {
+                Some(p) => format!("{scheme}://{host}:{p}"),
+                None => format!("{scheme}://{host}"),
+            };
+            HeaderValue::from_str(&origin).ok()
+        })
+        .collect();
+
+    // 定期清理过期会话/授权码/GeoIP 缓存，防止内存无界增长
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                state.cleanup_expired();
+            }
+        });
+    }
 
     // 速率限制配置
     let governor_conf = Arc::new(
@@ -1213,33 +1526,42 @@ async fn main() {
     // 2. 构造主路由
     let app = Router::new()
         // 根目录直接跳转到 prefix/
-        .route("/", get({
-            let p = prefix.clone();
-            move || {
-                let path = format!("{p}");
-                async move { Redirect::temporary(&path) }
-            }
-        }))
+        .route(
+            "/",
+            get({
+                let p = prefix.clone();
+                move || {
+                    let path = format!("{p}");
+                    async move { Redirect::temporary(&path) }
+                }
+            }),
+        )
         // 使用 nest 挂载业务路由
         // Axum 的 nest 会自动处理不带斜杠的访问（如果子路由有 "/"）
         // 但为了彻底消除重复定义的冲突，我们只在这里 nest
         .nest(&prefix, auth_router)
         // 固定路径不受 nest 影响
-        .route("/.well-known/openid-configuration", get(oidc_config_handler))
+        .route(
+            "/.well-known/openid-configuration",
+            get(oidc_config_handler),
+        )
         .layer(GovernorLayer {
             config: governor_conf,
         })
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(allowed_origins)
                 .allow_methods([axum::http::Method::GET, axum::http::Method::POST]),
         )
+        // 请求级访问日志（method、uri、状态码、耗时）
+        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    println!("服务运行在 http://{}", addr);
-    
+    info!(%addr, "服务启动");
+    info!("服务运行在 http://{}", addr);
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

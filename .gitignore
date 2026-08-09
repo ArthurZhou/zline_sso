@@ -4,3 +4,4 @@
 /static
 /students_data.csv
 GeoLite2-City.mmdb
+__pycache__

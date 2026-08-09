@@ -1,17 +1,20 @@
 #[cfg(debug_assertions)]
 use axum::http::StatusCode;
 
+use crate::AppState;
+use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
-use axum::extract::State;
 use std::sync::Arc;
-use crate::AppState;
 
 pub async fn login_page_handler(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     // 检查是否有cookie，如果有，显示继续页面
     let session_id = jar.get("sso_session").map(|c| c.value().to_string());
     let username = if let Some(ref sid) = session_id {
-        state.session_store.lock().unwrap()
+        state
+            .session_store
+            .lock()
+            .unwrap()
             .get(sid)
             .map(|s| s.username.clone())
     } else {

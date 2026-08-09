@@ -1,4 +1,0 @@
-# 允许在简单的链式调用中保持单行
-indent_style = "Visual" 
-# 或者调整控制链式调用的行为
-chain_width = 100

@@ -5,12 +5,12 @@
 //!
 
 use base64::{Engine as _, engine::general_purpose};
+use once_cell::sync::Lazy;
 use rand::thread_rng;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
 use std::collections::HashMap;
 use std::fs;
-use once_cell::sync::Lazy;
 use std::sync::RwLock;
 
 const ZLINEI_PUB_KEY: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCC0hrRIjb3noDWNtbDpANbjt5Iwu2NFeDwU16Ec87ToqeoIm2KI+cOs81JP9aTDk/jkAlU97mN8wZkEMDr5utAZtMVht7GLX33Wx9XjqxUsDfsGkqNL8dXJklWDu9Zh80Ui2Ug+340d5dZtKtd+nv09QZqGjdnSp9PTfFDBY133QIDAQAB";
@@ -69,8 +69,7 @@ pub fn encrypt_for_jincai(data: HashMap<String, String>) -> HashMap<String, Stri
 /// - 网络连接失败
 /// - HTTP响应读取失败
 /// - HTML解析失败（XToken元素不存在或格式异常）
-pub async fn get_xtoken() -> Result<String, String> {
-    let client = reqwest::Client::new();
+pub async fn get_xtoken(client: &reqwest::Client) -> Result<String, String> {
     let resp = client
         .get("https://www.jincai.sh.cn/zlineauthrize/xlogin")
         .header("User-Agent", "Mozilla/5.0")
@@ -110,9 +109,8 @@ pub async fn get_xtoken() -> Result<String, String> {
 /// - `Some((student_id, gender))`: 找到匹配项
 /// - `None`: 未找到匹配项或文件读取失败
 // 全局CSV缓存：键为 xuid -> (student_id, gender)
-static CSV_CACHE: Lazy<RwLock<HashMap<String, (String, String)>>> = Lazy::new(|| {
-    RwLock::new(HashMap::new())
-});
+static CSV_CACHE: Lazy<RwLock<HashMap<String, (String, String)>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// 从CSV文件加载到内存缓存。建议在程序启动时调用一次。
 pub fn load_csv_cache(file_path: &str) -> Result<(), std::io::Error> {
@@ -164,9 +162,9 @@ fn find_user_in_csv_file(_file_path: &str, target_xuid: &str) -> Option<(String,
 /// - 网络连接失败
 /// - xuid或xuxm字段解析失败(返回unknown,unknown)
 pub async fn get_external_user_info(
+    client: &reqwest::Client,
     pzl_cookie: &str,
 ) -> Result<(String, String, String, String), String> {
-    let client = reqwest::Client::new();
     let urls = [
         "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCAPW1002",
         "https://www.jincai.sh.cn/zlinesystem/xsso/gotox/JCA2W1004",
@@ -249,7 +247,7 @@ pub async fn login_with_jincai(
     password: String,
 ) -> Result<String, String> {
     // 步骤1: 获取XToken
-    let xtoken = get_xtoken().await?;
+    let xtoken = get_xtoken(http_client).await?;
 
     // 步骤2: 构建加密的登录请求体
     let mut data = HashMap::new();

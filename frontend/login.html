@@ -262,6 +262,7 @@
                 const clientId = urlParams.get('client_id') || "";
                 const redirectUri = urlParams.get('redirect_uri') || "";
                 const oauthState = urlParams.get('state') || "";
+                const oauthNonce = urlParams.get('nonce') || "";
                 const syncInfo = urlParams.get('sync_info')==="1" || urlParams.get('sync_info')==="true" || false;
 
                 // 如果没有client_id，则为直接登录模式（无OAuth）
@@ -286,6 +287,7 @@
                         client_id: clientId,
                         redirect_uri: redirectUri,
                         state: oauthState,
+                        nonce: oauthNonce,
                         sync_info: syncInfo
                     })
                 });
@@ -305,6 +307,7 @@
                             const target = new URL(data.redirect_uri);
                             target.searchParams.set('code', data.code);
                             if (data.state) target.searchParams.set('state', data.state);
+                            if (data.nonce) target.searchParams.set('nonce', data.nonce);
                             window.location.href = target.toString();
                         }
                     } else {
