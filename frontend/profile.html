@@ -81,7 +81,7 @@
 
         .btn {
             padding: 8px 16px;
-            border: 2px solid var(--border);
+            border: none;
             font-family: inherit;
             font-size: 12px;
             font-weight: 700;
@@ -114,10 +114,9 @@
         }
 
         .card {
-            background: var(--card-bg);
-            border: 2px solid var(--border);
-            padding: 20px;
-            border-radius: 4px;
+            background: none;
+            border: none;
+            padding: 0;
         }
 
         .card h2 {
@@ -138,9 +137,7 @@
         }
 
         .sync-section {
-            margin-top: 15px;
-            padding-top: 15px;
-            border-top: 1px dashed var(--border);
+            margin-top: 20px;
         }
 
         .sync-note {
@@ -170,7 +167,6 @@
             font-size: 11px;
             font-weight: 700;
             text-transform: uppercase;
-            border-radius: 2px;
         }
 
         .status-badge.locked {
@@ -197,8 +193,7 @@
             color: var(--error);
             font-weight: 700;
             padding: 15px;
-            background: var(--card-bg);
-            border-left: 4px solid var(--error);
+            background: var(--input-bg);
             text-align: left;
         }
 
@@ -222,8 +217,6 @@
             text-transform: uppercase;
             font-weight: 700;
             color: var(--muted);
-            border-bottom: 1px dashed var(--border);
-            padding-bottom: 6px;
         }
 
         .tag-subtitle:first-of-type {
@@ -243,15 +236,17 @@
             min-width: 200px;
             padding: 8px;
             background: var(--input-bg);
-            border: 2px solid var(--border);
+            border: none;
+            border-bottom: 2px solid transparent;
             color: var(--text);
             font-family: inherit;
             font-size: 13px;
             outline: none;
+            transition: border-color 0.2s;
         }
 
         .tag-input:focus {
-            background: var(--bg);
+            border-bottom-color: var(--text);
         }
 
         .btn-tag {
@@ -295,7 +290,6 @@
             margin: 1px 2px 1px 0;
             font-size: 11px;
             font-weight: 700;
-            border-radius: 2px;
             background: var(--accent);
             color: var(--accent-text);
         }
