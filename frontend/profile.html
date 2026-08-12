@@ -215,6 +215,106 @@
             text-decoration: underline;
         }
 
+        /* 标签管理 */
+        .tag-toolbar {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+
+        .tag-input {
+            flex: 1;
+            min-width: 200px;
+            padding: 8px;
+            background: var(--input-bg);
+            border: 2px solid var(--border);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 13px;
+            outline: none;
+        }
+
+        .tag-input:focus {
+            background: var(--bg);
+        }
+
+        .btn-tag {
+            background: var(--accent);
+            color: var(--accent-text);
+        }
+
+        .btn-sm {
+            padding: 4px 10px;
+            font-size: 11px;
+        }
+
+        .btn-ghost {
+            background: transparent;
+            color: var(--text);
+        }
+
+        .tag-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .tag-table th,
+        .tag-table td {
+            text-align: left;
+            padding: 8px;
+            border-bottom: 1px solid var(--input-bg);
+            vertical-align: middle;
+        }
+
+        .tag-table th {
+            text-transform: uppercase;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .tag-badge {
+            display: inline-block;
+            padding: 2px 7px;
+            margin: 1px 2px 1px 0;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: 2px;
+            background: var(--accent);
+            color: var(--accent-text);
+        }
+
+        .tag-msg {
+            margin: 10px 0;
+            font-size: 13px;
+            font-weight: 700;
+            min-height: 1.2em;
+        }
+
+        .tag-msg.error {
+            color: var(--error);
+        }
+
+        .tag-msg.success {
+            color: var(--success);
+        }
+
+        .empty {
+            text-align: center;
+            padding: 20px;
+            color: var(--muted);
+        }
+
+        .pager {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 12px;
+            justify-content: flex-end;
+        }
+
         @media (max-width: 600px) {
             .header {
                 flex-direction: column;
@@ -313,6 +413,23 @@
                         style="flex-direction: column; display: flex; gap: 8px;">
                         <span>加载中...</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- 标签管理（仅 staff 用户可见） -->
+            <div class="card hidden" id="tagManageCard" style="grid-column: 1 / -1;">
+                <h2>标签管理</h2>
+                <p class="sync-note" id="tagManageHint"></p>
+                <div class="tag-toolbar">
+                    <input type="text" id="tagKeyword" class="tag-input" placeholder="搜索 用户名 / 姓名">
+                    <button class="btn btn-tag" id="tagSearchBtn">查询</button>
+                </div>
+                <div id="tagMsg" class="tag-msg"></div>
+                <div id="tagUserList"></div>
+                <div class="pager">
+                    <button class="btn btn-sm btn-ghost" id="tagPrev">上一页</button>
+                    <span id="tagPageInfo" style="font-size:12px;color:var(--muted);"></span>
+                    <button class="btn btn-sm btn-ghost" id="tagNext">下一页</button>
                 </div>
             </div>
         </div>
@@ -414,6 +531,102 @@
             // 切换视图
             statusView.classList.add('hidden');
             profileContent.classList.remove('hidden');
+
+            // 标签管理（staff 用户展示）
+            setupTagManage(data);
+        }
+
+        // ---- 标签管理（staff）----
+        const tagState = { keyword: '', offset: 0, limit: 50, hasMore: false, manageable: [] };
+
+        function showTagMsg(text, isError) {
+            const el = document.getElementById('tagMsg');
+            el.textContent = text || '';
+            el.className = 'tag-msg ' + (isError ? 'error' : 'success');
+            if (text) setTimeout(() => { el.textContent = ''; }, 3000);
+        }
+
+        async function setupTagManage(data) {
+            const card = document.getElementById('tagManageCard');
+            if (!data.can_manage_tags) return;
+            try {
+                const r = await fetch(`${AUTH_PATH}/profile/tags`);
+                const d = await r.json();
+                if (d.error || !d.can_manage) return;
+                tagState.manageable = d.manageable_tags || [];
+                if (!tagState.manageable.length) return;
+                document.getElementById('tagManageHint').textContent =
+                    '您可以管理的标签：' + tagState.manageable.join('、') +
+                    '。可为其他用户添加或移除这些标签。';
+                card.classList.remove('hidden');
+                loadTagUsers(0);
+            } catch (e) {
+                // 静默失败，不阻塞个人中心
+            }
+        }
+
+        async function loadTagUsers(offset) {
+            tagState.offset = offset;
+            const params = new URLSearchParams({ keyword: tagState.keyword, limit: tagState.limit, offset: tagState.offset });
+            try {
+                const r = await fetch(`${AUTH_PATH}/profile/tags/users?${params}`);
+                if (!r.ok) { showTagMsg('加载失败', true); return; }
+                const d = await r.json();
+                if (d.error) { showTagMsg(d.error, true); return; }
+                const list = d.users || [];
+                tagState.hasMore = list.length >= tagState.limit;
+                renderTagUsers(list);
+                document.getElementById('tagPageInfo').textContent =
+                    `第 ${Math.floor(tagState.offset / tagState.limit) + 1} 页${tagState.hasMore ? '+' : ''}`;
+            } catch (e) {
+                showTagMsg('网络错误', true);
+            }
+        }
+
+        function renderTagUsers(list) {
+            const wrap = document.getElementById('tagUserList');
+            if (!list.length) {
+                wrap.innerHTML = '<div class="empty">没有找到用户</div>';
+                return;
+            }
+            let html = '<table class="tag-table"><thead><tr><th>用户名</th><th>姓名</th><th>标签</th><th>操作</th></tr></thead><tbody>';
+            for (const u of list) {
+                const roles = (u.role || '').split(',').map(s => s.trim()).filter(Boolean);
+                const badges = roles.length
+                    ? roles.map(r => `<span class="tag-badge">${escapeHtml(r)}</span>`).join(' ')
+                    : '<span style="color:var(--muted)">-</span>';
+                const ops = tagState.manageable.map(t => {
+                    const has = roles.includes(t);
+                    const act = has ? 'remove' : 'add';
+                    return `<button class="btn btn-tag btn-sm" data-tagact="${act}" data-username="${escapeHtml(u.username)}" data-tag="${escapeHtml(t)}">${has ? '移除 ' : '添加 '}${escapeHtml(t)}</button>`;
+                }).join(' ') || '<span style="color:var(--muted)">无可管理标签</span>';
+                html += `<tr>
+                    <td><strong>${escapeHtml(u.username)}</strong></td>
+                    <td>${escapeHtml(u.full_name) || '-'}</td>
+                    <td style="white-space:normal">${badges}</td>
+                    <td style="white-space:normal">${ops}</td>
+                </tr>`;
+            }
+            html += '</tbody></table>';
+            wrap.innerHTML = html;
+        }
+
+        async function doTagAction(username, tag, act) {
+            const url = act === 'add'
+                ? `${AUTH_PATH}/profile/tags/add`
+                : `${AUTH_PATH}/profile/tags/remove`;
+            try {
+                const r = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, tag }),
+                });
+                const d = await r.json();
+                if (d.error) showTagMsg(d.error, true);
+                else { showTagMsg(d.message || '操作成功'); loadTagUsers(tagState.offset); }
+            } catch (e) {
+                showTagMsg('网络错误', true);
+            }
         }
 
         function handleSessionError(msg) {
@@ -495,6 +708,29 @@
 
         // 更新 agreement 链接
         document.getElementById('agreementLink').href = `${AUTH_PATH}/agreement`;
+
+        // ---- 标签管理事件 ----
+        document.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-tagact]');
+            if (btn) {
+                doTagAction(btn.dataset.username, btn.dataset.tag, btn.dataset.tagact);
+                return;
+            }
+        });
+
+        document.getElementById('tagSearchBtn').addEventListener('click', () => {
+            tagState.keyword = document.getElementById('tagKeyword').value.trim();
+            loadTagUsers(0);
+        });
+        document.getElementById('tagKeyword').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('tagSearchBtn').click();
+        });
+        document.getElementById('tagPrev').addEventListener('click', () => {
+            if (tagState.offset > 0) loadTagUsers(Math.max(0, tagState.offset - tagState.limit));
+        });
+        document.getElementById('tagNext').addEventListener('click', () => {
+            if (tagState.hasMore) loadTagUsers(tagState.offset + tagState.limit);
+        });
 
         loadProfile();
     </script>

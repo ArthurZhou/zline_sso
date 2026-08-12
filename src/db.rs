@@ -437,12 +437,59 @@ pub fn list_users(
 /// # 参数
 /// - `conn`: 数据库连接
 /// - `uid`: 用户 uuid
-/// - `role`: 新角色，如 "user" / "admin"
+/// - `role`: 新角色，如 "user" / "admin" / "staff" 或逗号分隔的多个角色
 pub fn set_user_role(conn: &DbConn, uid: &str, role: &str) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE users SET role=?2 WHERE uid=?1",
         rusqlite::params![uid, role],
     )?;
+    Ok(())
+}
+
+/// 添加用户（管理员使用）。
+///
+/// 直接插入一条新用户记录，默认状态为 Normal，失败次数为 0。
+/// 调用方需保证 `username` 在当前表中不存在（否则会违反唯一约束）。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `username`: 用户名（唯一标识）
+/// - `role`: 初始角色/标签（可为逗号分隔的多个）
+/// - `full_name`: 姓名（可为空）
+///
+/// # 返回值
+/// - `Ok(())`: 操作成功
+/// - `Err(rusqlite::Error)`: 数据库操作失败
+pub fn add_user(
+    conn: &DbConn,
+    username: &str,
+    role: &str,
+    full_name: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO users (uid, username, external_uid, full_name, role, state, failed_attempts) \
+         VALUES (?1, ?2, '', ?3, ?4, 0, 0)",
+        rusqlite::params![Uuid::new_v4().to_string(), username, full_name, role],
+    )?;
+    Ok(())
+}
+
+/// 删除用户（管理员使用）。
+///
+/// 删除指定用户名对应的用户记录，并顺带清理其登录日志（避免外键残留）。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `username`: 要删除的用户名
+///
+/// # 返回值
+/// - `Ok(())`: 操作成功（用户不存在时也返回 Ok，相当于无操作）
+/// - `Err(rusqlite::Error)`: 数据库操作失败
+pub fn delete_user(conn: &DbConn, username: &str) -> Result<(), rusqlite::Error> {
+    if let Some(info) = get_user_full_info(conn, username)? {
+        conn.execute("DELETE FROM login_logs WHERE uid = ?1", [&info.uid])?;
+        conn.execute("DELETE FROM users WHERE uid = ?1", [&info.uid])?;
+    }
     Ok(())
 }
 

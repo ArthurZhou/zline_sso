@@ -330,6 +330,7 @@
                 <div class="toolbar">
                     <input type="text" id="userKeyword" placeholder="搜索 用户名 / 姓名 / 外部ID">
                     <button class="btn" id="userSearchBtn">查询</button>
+                    <button class="btn" id="userAddBtn" style="background:var(--success);color:#000;">添加用户</button>
                 </div>
                 <div id="userTableWrap" class="table-wrap"></div>
                 <div class="pager">
@@ -453,10 +454,11 @@
                     <th>状态</th><th>最后登录</th><th>失败次数</th><th>操作</th>
                 </tr></thead><tbody>`;
             for (const u of list) {
-                const roleSel = `<input type="text" class="role-input" data-uid="${esc(u.uid)}" data-username="${esc(u.username)}" data-role="${esc(u.role)}" value="${esc(u.role)}" title="直接输入新角色后回车即可生效">`;
+                const roleSel = `<input type="text" class="role-input" data-uid="${esc(u.uid)}" data-username="${esc(u.username)}" data-role="${esc(u.role)}" value="${esc(u.role)}" title="支持逗号分隔多个角色，仅允许字母/数字/-/_">`;
                 const banBtn = (u.state === 1 || u.state === 2)
                     ? `<button class="btn btn-sm" data-act="unban" data-username="${esc(u.username)}" style="background:var(--success);color:#000;">解封</button>`
                     : `<button class="btn btn-sm" data-act="ban" data-username="${esc(u.username)}" style="background:var(--error);">封禁</button>`;
+                const delBtn = `<button class="btn btn-sm" data-act="del" data-username="${esc(u.username)}" style="background:var(--warn);color:#000;">删除</button>`;
                 html += `<tr>
                     <td><strong>${esc(u.username)}</strong></td>
                     <td>${esc(u.full_name) || '-'}</td>
@@ -465,7 +467,7 @@
                     <td>${stateBadge(u.state, u.state_description)}</td>
                     <td>${formatLocalTime(u.last_login_time)}</td>
                     <td>${u.failed_attempts}</td>
-                    <td class="actions">${banBtn}</td>
+                    <td class="actions">${banBtn}${delBtn}</td>
                 </tr>`;
             }
             html += '</tbody></table>';
@@ -544,6 +546,33 @@
             if (d.error) showMsg(d.error, true); else showMsg(d.message || '角色已更新');
         }
 
+        async function doAddUser() {
+            const username = window.prompt('请输入新用户的用户名：', '');
+            if (username === null || !username.trim()) return;
+            const roleInput = window.prompt('请输入初始角色/标签（逗号分隔多个，仅允许字母/数字/-/_，留空默认 user）：', 'user');
+            if (roleInput === null) return;
+            const role = roleInput.trim() || 'user';
+            const nameInput = window.prompt('请输入姓名（可选，直接确定跳过）：', '');
+            if (nameInput === null) return;
+            const full_name = nameInput.trim();
+            const r = await fetch(`${AUTH_PATH}/admin/api/users`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: username.trim(), role, full_name }),
+            });
+            const d = await r.json();
+            if (d.error) showMsg(d.error, true); else { showMsg(d.message || '已添加'); loadUsers(0); }
+        }
+
+        async function doDeleteUser(username) {
+            if (!window.confirm(`确定删除用户 ${username} 吗？此操作不可恢复！`)) return;
+            const r = await fetch(`${AUTH_PATH}/admin/api/users/${encodeURIComponent(username)}/delete`, {
+                method: 'POST',
+            });
+            const d = await r.json();
+            if (d.error) showMsg(d.error, true); else { showMsg(d.message || '已删除'); loadUsers(users.offset); }
+        }
+
         // ---- 事件绑定 ----
         document.addEventListener('click', async (e) => {
             const btn = e.target.closest('button[data-act]');
@@ -552,6 +581,7 @@
                 const username = btn.dataset.username;
                 if (act === 'ban') await doBan(username);
                 else if (act === 'unban') await doUnban(username);
+                else if (act === 'del') await doDeleteUser(username);
                 return;
             }
             const tab = e.target.closest('.tab');
@@ -579,6 +609,9 @@
         document.getElementById('userSearchBtn').addEventListener('click', () => {
             users.keyword = document.getElementById('userKeyword').value.trim();
             loadUsers(0);
+        });
+        document.getElementById('userAddBtn').addEventListener('click', () => {
+            doAddUser();
         });
         document.getElementById('userKeyword').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') document.getElementById('userSearchBtn').click();

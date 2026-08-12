@@ -120,6 +120,76 @@ struct AdminBanRequest {
     duration_hours: Option<i64>,
 }
 
+/// 管理员添加用户请求
+#[derive(Deserialize)]
+struct AdminAddUserRequest {
+    username: String,
+    /// 初始角色/标签（逗号分隔，可缺省，缺省为 "user"）
+    role: Option<String>,
+    full_name: Option<String>,
+}
+
+/// 员工（staff）标签管理请求
+///
+/// 用于为其他用户添加 / 移除标签。
+#[derive(Deserialize)]
+struct TagManageRequest {
+    username: String,
+    tag: String,
+}
+
+/// 校验并规范化角色字符串（逗号分隔的多角色）。
+///
+/// 每个角色只能包含 ASCII 字母、数字、连字符 `-` 与下划线 `_`，
+/// 且自动去除重复项与空白。返回规范化后的逗号分隔字符串。
+fn validate_role_str(role: &str) -> Result<String, String> {
+    let mut seen: Vec<String> = Vec::new();
+    for part in role.split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("角色 `{}` 只能包含字母、数字、连字符与下划线", t));
+        }
+        if !seen.iter().any(|s| s == t) {
+            seen.push(t.to_string());
+        }
+    }
+    Ok(seen.join(","))
+}
+
+/// 将角色字符串拆分为角色列表（按逗号分割并去除空白与空项）。
+fn parse_roles(role: &str) -> Vec<String> {
+    role.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 判断角色字符串中是否包含指定角色。
+fn has_role(role: &str, target: &str) -> bool {
+    parse_roles(role).iter().any(|r| r == target)
+}
+
+/// 向角色字符串中添加一个标签（若已存在则保持不变）。
+fn add_tag_to_role(role: &str, tag: &str) -> String {
+    let mut roles = parse_roles(role);
+    if !roles.iter().any(|r| r == tag) {
+        roles.push(tag.to_string());
+    }
+    roles.join(",")
+}
+
+/// 从角色字符串中移除一个标签（若不存在则保持不变）。
+fn remove_tag_from_role(role: &str, tag: &str) -> String {
+    parse_roles(role)
+        .into_iter()
+        .filter(|r| r != tag)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Access Token 声明（携带者令牌，用于 userinfo 端点）
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -1005,6 +1075,19 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
                 state.config.login_record_window,
             )
             .unwrap_or_default();
+
+            // 标签管理权限：仅非管理员会话中的 staff 用户可管理其自带的标签
+            // （排除基线角色 `user` 与提权风险角色 `staff` / `admin`）
+            let roles = parse_roles(&user_info.role);
+            let is_staff = roles.iter().any(|r| r == "staff");
+            let manageable_tags: Vec<String> = roles
+                .iter()
+                .filter(|r| {
+                    r.as_str() != "staff" && r.as_str() != "admin" && r.as_str() != "user"
+                })
+                .cloned()
+                .collect();
+
             Json(json!({
                 "username": user_info.username,
                 "role": user_info.role,
@@ -1018,6 +1101,8 @@ async fn profile_api_handler(State(state): State<Arc<AppState>>, jar: CookieJar)
                 "restriction_end_time": user_info.restriction_end_time,
                 "flag": user_info.flag,
                 "login_attempts": login_attempts,
+                "can_manage_tags": is_staff,
+                "manageable_tags": manageable_tags,
             }))
             .into_response()
         }
@@ -1063,6 +1148,76 @@ fn require_admin(state: &Arc<AppState>, jar: &CookieJar) -> Result<String, Respo
     }
 
     Ok(username)
+}
+
+/// 从会话 Cookie 校验登录身份。
+///
+/// 返回 `(用户名, 是否为管理员会话)`；未登录或会话失效时返回对应的 HTTP 错误响应。
+fn require_session(
+    state: &Arc<AppState>,
+    jar: &CookieJar,
+) -> Result<(String, bool), Response> {
+    let session_id = match jar.get("sso_session") {
+        Some(c) => c.value().to_string(),
+        None => {
+            return Err((axum::http::StatusCode::UNAUTHORIZED, Json(json!({"error":"未登录"}))).into_response());
+        }
+    };
+
+    let store = state.session_store.lock().unwrap();
+    match store.get(&session_id) {
+        Some(s) => Ok((s.username.clone(), s.is_admin)),
+        None => Err(
+            (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"error":"会话无效或已过期"}))).into_response(),
+        ),
+    }
+}
+
+/// 校验当前会话是否为可进行标签管理的 staff 用户。
+///
+/// 仅当会话为普通（非管理员）登录，且当前用户的角色包含 `staff` 时放行，
+/// 返回 `(用户名, 可管理标签列表)`。可管理标签 = 当前用户自带的标签
+/// （不含基线角色 `user` 与提权风险角色 `staff` / `admin`）。
+fn require_tag_manager(
+    state: &Arc<AppState>,
+    jar: &CookieJar,
+) -> Result<(String, Vec<String>), Response> {
+    let (username, is_admin) = match require_session(state, jar) {
+        Ok(v) => v,
+        Err(r) => return Err(r),
+    };
+    if is_admin {
+        return Err(
+            (axum::http::StatusCode::FORBIDDEN, Json(json!({"error":"管理员会话不支持标签管理"}))).into_response(),
+        );
+    }
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => {
+            return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"内部错误"}))).into_response());
+        }
+    };
+
+    let user_info = match db::get_user_full_info(&conn, &username) {
+        Ok(Some(u)) => u,
+        _ => {
+            return Err((axum::http::StatusCode::FORBIDDEN, Json(json!({"error":"用户不存在"}))).into_response());
+        }
+    };
+
+    let roles = parse_roles(&user_info.role);
+    if !roles.iter().any(|r| r == "staff") {
+        return Err(
+            (axum::http::StatusCode::FORBIDDEN, Json(json!({"error":"需要 staff 标签权限"}))).into_response(),
+        );
+    }
+
+    let manageable: Vec<String> = roles
+        .into_iter()
+        .filter(|r| r != "staff" && r != "admin" && r != "user")
+        .collect();
+    Ok((username, manageable))
 }
 
 /// 查询用户列表（管理员）。
@@ -1218,7 +1373,8 @@ async fn admin_unban_handler(
 
 /// 设置用户角色（管理员）。
 ///
-/// Body：`{ "role": "user" | "admin" | ... }`。
+/// Body：`{ "role": "user" | "admin" | "staff" | "tag-a,tag-b" | ... }`。
+/// 支持逗号分隔的多个角色，每个角色仅允许字母、数字、连字符与下划线。
 async fn admin_role_handler(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -1233,6 +1389,12 @@ async fn admin_role_handler(
     if role.is_empty() {
         return Json(json!({"error": "角色不能为空"})).into_response();
     }
+    // 校验角色格式：逗号分隔的多角色，每个仅允许字母/数字/-/_，并规范化
+    let role = match validate_role_str(&role) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => return Json(json!({"error": "角色不能为空"})).into_response(),
+        Err(e) => return Json(json!({"error": e})).into_response(),
+    };
 
     let conn = match state.db_pool.get() {
         Ok(c) => c,
@@ -1250,6 +1412,276 @@ async fn admin_role_handler(
 
     Json(json!({ "success": true, "message": format!("已将 {} 的角色设置为 {}", username, role) }))
         .into_response()
+}
+
+/// 添加用户（管理员）。
+///
+/// Body：`{ "username": 必填, "role": 可选（默认 "user"）, "full_name": 可选 }`。
+async fn admin_add_user_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Json(payload): Json<AdminAddUserRequest>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &jar) {
+        return resp;
+    }
+
+    let username = payload.username.trim().to_string();
+    if username.is_empty() {
+        return Json(json!({"error": "用户名不能为空"})).into_response();
+    }
+
+    // 初始角色：缺省为 "user"，否则校验格式
+    let role = match payload.role {
+        Some(r) => match validate_role_str(&r) {
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) => "user".to_string(),
+            Err(e) => return Json(json!({"error": e})).into_response(),
+        },
+        None => "user".to_string(),
+    };
+
+    let full_name = payload.full_name.unwrap_or_default().trim().to_string();
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    if let Ok(Some(_)) = db::get_user_full_info(&conn, &username) {
+        return Json(json!({"error": "用户已存在"})).into_response();
+    }
+
+    if let Err(_) = db::add_user(&conn, &username, &role, &full_name) {
+        return Json(json!({"error": "内部错误"})).into_response();
+    }
+
+    Json(json!({ "success": true, "message": format!("已添加用户 {}（角色：{}）", username, role) }))
+        .into_response()
+}
+
+/// 删除用户（管理员）。
+async fn admin_delete_user_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Path(username): Path<String>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &jar) {
+        return resp;
+    }
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let exists = db::get_user_full_info(&conn, &username)
+        .map(|o| o.is_some())
+        .unwrap_or(false);
+    if !exists {
+        return Json(json!({"error": "用户不存在"})).into_response();
+    }
+
+    if let Err(_) = db::delete_user(&conn, &username) {
+        return Json(json!({"error": "内部错误"})).into_response();
+    }
+
+    Json(json!({ "success": true, "message": format!("已删除用户 {}", username) })).into_response()
+}
+
+// ============ 员工（staff）标签管理 ============
+
+/// 获取当前用户（staff）可管理的标签信息。
+///
+/// 返回 `{ can_manage, staff, role, manageable_tags }`。
+/// 用于前端判断是否展示标签管理界面。
+async fn profile_tags_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
+    let (username, is_admin) = match require_session(&state, &jar) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let user_info = match db::get_user_full_info(&conn, &username) {
+        Ok(Some(u)) => u,
+        _ => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let roles = parse_roles(&user_info.role);
+    let is_staff = roles.iter().any(|r| r == "staff");
+    let manageable_tags: Vec<String> = roles
+        .into_iter()
+        .filter(|r| r != "staff" && r != "admin" && r != "user")
+        .collect();
+
+    Json(json!({
+        "can_manage": is_staff && !is_admin,
+        "staff": is_staff,
+        "role": user_info.role,
+        "manageable_tags": manageable_tags,
+    }))
+    .into_response()
+}
+
+/// 员工标签管理：查询用户列表（仅 staff 用户可用）。
+///
+/// Query 参数：`keyword`、`limit`、`offset`。
+async fn profile_tag_users_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = require_tag_manager(&state, &jar) {
+        return resp;
+    }
+
+    let keyword = params.get("keyword").cloned().unwrap_or_default();
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let offset: i64 = params
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .max(0);
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let users = match db::list_users(&conn, &keyword, limit, offset) {
+        Ok(u) => u,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let list: Vec<_> = users
+        .iter()
+        .map(|u| {
+            json!({
+                "username": u.username,
+                "full_name": u.full_name,
+                "role": u.role,
+            })
+        })
+        .collect();
+
+    Json(json!({ "users": list })).into_response()
+}
+
+/// 员工标签管理：为其他用户添加标签。
+///
+/// Body：`{ "username": 目标用户, "tag": 要添加的标签 }`。
+/// 仅允许添加当前 staff 用户自带的标签（不含 `staff` / `admin`）。
+async fn profile_tag_add_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Json(payload): Json<TagManageRequest>,
+) -> Response {
+    let (_me, manageable) = match require_tag_manager(&state, &jar) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+
+    let tag = payload.tag.trim().to_string();
+    if !manageable.iter().any(|t| *t == tag) {
+        return Json(json!({"error": "您不能管理该标签"})).into_response();
+    }
+
+    let target_username = payload.username.trim().to_string();
+    if target_username.is_empty() {
+        return Json(json!({"error": "用户名不能为空"})).into_response();
+    }
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let target = match db::get_user_full_info(&conn, &target_username) {
+        Ok(Some(u)) => u,
+        _ => return Json(json!({"error": "用户不存在"})).into_response(),
+    };
+
+    if has_role(&target.role, &tag) {
+        return Json(json!({
+            "error": format!("用户 {} 已拥有标签 {}", target_username, tag)
+        }))
+        .into_response();
+    }
+
+    let new_role = add_tag_to_role(&target.role, &tag);
+    if let Err(_) = db::set_user_role(&conn, &target.uid, &new_role) {
+        return Json(json!({"error": "内部错误"})).into_response();
+    }
+
+    Json(json!({
+        "success": true,
+        "message": format!("已为 {} 添加标签 {}", target_username, tag)
+    }))
+    .into_response()
+}
+
+/// 员工标签管理：移除其他用户的标签。
+///
+/// Body：`{ "username": 目标用户, "tag": 要移除的标签 }`。
+/// 仅允许移除当前 staff 用户自带的标签（不含 `staff` / `admin`）。
+async fn profile_tag_remove_handler(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Json(payload): Json<TagManageRequest>,
+) -> Response {
+    let (_me, manageable) = match require_tag_manager(&state, &jar) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+
+    let tag = payload.tag.trim().to_string();
+    if !manageable.iter().any(|t| *t == tag) {
+        return Json(json!({"error": "您不能管理该标签"})).into_response();
+    }
+
+    let target_username = payload.username.trim().to_string();
+    if target_username.is_empty() {
+        return Json(json!({"error": "用户名不能为空"})).into_response();
+    }
+
+    let conn = match state.db_pool.get() {
+        Ok(c) => c,
+        Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
+    };
+
+    let target = match db::get_user_full_info(&conn, &target_username) {
+        Ok(Some(u)) => u,
+        _ => return Json(json!({"error": "用户不存在"})).into_response(),
+    };
+
+    if !has_role(&target.role, &tag) {
+        return Json(json!({
+            "error": format!("用户 {} 没有标签 {}", target_username, tag)
+        }))
+        .into_response();
+    }
+
+    let new_role = remove_tag_from_role(&target.role, &tag);
+    if let Err(_) = db::set_user_role(&conn, &target.uid, &new_role) {
+        return Json(json!({"error": "内部错误"})).into_response();
+    }
+
+    Json(json!({
+        "success": true,
+        "message": format!("已移除 {} 的标签 {}", target_username, tag)
+    }))
+    .into_response()
 }
 
 /// 判断给定的 redirect_uri 是否与配置中的某个条目匹配。
@@ -1886,6 +2318,10 @@ async fn main() {
         .route("/logout", get(logout_handler))
         .route("/profile", get(statics::profile_page_handler))
         .route("/profile/api", get(profile_api_handler))
+        .route("/profile/tags", get(profile_tags_handler))
+        .route("/profile/tags/users", get(profile_tag_users_handler))
+        .route("/profile/tags/add", post(profile_tag_add_handler))
+        .route("/profile/tags/remove", post(profile_tag_remove_handler))
         .route("/token", post(token_exchange_handler))
         .route("/userinfo", get(userinfo_handler))
         .route("/jwks", get(jwks_handler));
@@ -1912,7 +2348,10 @@ async fn main() {
         )
         .nest(&prefix, auth_router)
         // 管理员 API（放在主路由、显式带 prefix）
-        .route(&format!("{prefix}/admin/api/users"), get(admin_users_handler))
+        .route(
+            &format!("{prefix}/admin/api/users"),
+            get(admin_users_handler).post(admin_add_user_handler),
+        )
         .route(&format!("{prefix}/admin/api/logs"), get(admin_logs_handler))
         .route(
             &format!("{prefix}/admin/api/users/:username/ban"),
@@ -1925,6 +2364,10 @@ async fn main() {
         .route(
             &format!("{prefix}/admin/api/users/:username/role"),
             post(admin_role_handler),
+        )
+        .route(
+            &format!("{prefix}/admin/api/users/:username/delete"),
+            post(admin_delete_user_handler),
         )
         // 固定路径不受 nest 影响
         .route(

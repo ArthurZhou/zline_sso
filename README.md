@@ -102,6 +102,45 @@ sequenceDiagram
 
 基础声明 `sub` 与 `preferred_username`（由 `sub` 派生）始终返回，属于 OIDC 标准声明。
 
+## 多角色与标签管理
+
+`role` 字段支持**逗号分隔的多个角色/标签**（如 `"user,staff,tag-a,tag-b"`）。
+每个角色只能包含 ASCII 字母、数字、连字符 `-` 与下划线 `_`，设置角色时会自动校验并去除重复项。
+
+| 角色/标签 | 说明 |
+| --- | --- |
+| `user` | 默认角色（新用户） |
+| `admin` | 管理标识（真实管理员以配置中的 `[admin]` 会话为准，此角色仅作展示） |
+| `staff` | 标签管理权限：拥有该标签的普通用户可在个人中心为他人添加/移除标签 |
+
+### staff 标签管理（个人中心）
+
+普通（非管理员）用户若带有 `staff` 标签，进入个人中心后会出现「标签管理」卡片，
+可搜索用户并为其他用户**添加/移除其自身携带的标签**。
+
+- 可管理的标签 = 该用户自身角色中除 `staff`、`admin` 之外的所有标签。
+  例如用户 A 的角色为 `tag-a,staff,tag-b`，则 A 可以给其他人添加或移除 `tag-a` 与 `tag-b`。
+- `staff` 与 `admin` 标签不可被 staff 用户授予/移除，防止提权。
+- 管理员会话不参与标签管理（使用管理控制台）。
+
+相关端点（均需登录，标签操作用例需 `staff` 权限）：
+
+| 端点 | 方法 | 说明 |
+| --- | --- | --- |
+| `{prefix}/profile/tags` | GET | 当前用户的标签管理信息（`can_manage`、`manageable_tags`） |
+| `{prefix}/profile/tags/users` | GET | 搜索用户列表（`keyword`/`limit`/`offset`） |
+| `{prefix}/profile/tags/add` | POST | 为其他用户添加标签（Body：`{"username","tag"}`） |
+| `{prefix}/profile/tags/remove` | POST | 移除其他用户的标签（Body：`{"username","tag"}`） |
+
+### 管理控制台：用户增删
+
+管理控制台「用户管理」新增 **添加用户** 与每行的 **删除** 操作：
+
+| 端点 | 方法 | 说明 |
+| --- | --- | --- |
+| `{prefix}/admin/api/users` | POST | 添加用户（Body：`{"username","role"?,"full_name"?}`，role 缺省为 `user`） |
+| `{prefix}/admin/api/users/:username/delete` | POST | 删除用户（同时清理其登录日志） |
+
 ## 日志
 
 使用 `tracing` 结构化日志：
