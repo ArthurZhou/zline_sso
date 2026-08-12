@@ -221,13 +221,19 @@
             white-space: nowrap;
         }
 
-        .actions select {
+        .actions select,
+        .role-input {
             padding: 4px;
             background: var(--input-bg);
             border: 2px solid var(--border);
             color: var(--text);
             font-family: inherit;
             font-size: 11px;
+        }
+
+        .role-input {
+            width: 90px;
+            text-align: center;
         }
 
         .pager {
@@ -447,9 +453,7 @@
                     <th>状态</th><th>最后登录</th><th>失败次数</th><th>操作</th>
                 </tr></thead><tbody>`;
             for (const u of list) {
-                const roleSel = `<select data-uid="${esc(u.uid)}" data-username="${esc(u.username)}">
-                    ${['user', 'admin', 'staff'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
-                </select>`;
+                const roleSel = `<input type="text" class="role-input" data-uid="${esc(u.uid)}" data-username="${esc(u.username)}" data-role="${esc(u.role)}" value="${esc(u.role)}" title="直接输入新角色后回车即可生效">`;
                 const banBtn = (u.state === 1 || u.state === 2)
                     ? `<button class="btn btn-sm" data-act="unban" data-username="${esc(u.username)}" style="background:var(--success);color:#000;">解封</button>`
                     : `<button class="btn btn-sm" data-act="ban" data-username="${esc(u.username)}" style="background:var(--error);">封禁</button>`;
@@ -560,13 +564,15 @@
         });
 
         document.addEventListener('change', async (e) => {
-            const sel = e.target.closest('select[data-uid]');
-            if (sel) {
-                if (window.confirm(`确定将用户 ${sel.dataset.username} 的角色设为 ${sel.value} 吗？`)) {
-                    await doRole(sel.dataset.uid, sel.dataset.username, sel.value);
-                } else {
-                    loadUsers(users.offset);
+            const inp = e.target.closest('input[data-uid]');
+            if (inp) {
+                const role = inp.value.trim();
+                if (!role) { showMsg('角色不能为空', true); loadUsers(users.offset); return; }
+                if (role === inp.dataset.role) return;
+                if (window.confirm(`确定将用户 ${inp.dataset.username} 的角色设为 ${role} 吗？`)) {
+                    await doRole(inp.dataset.uid, inp.dataset.username, role);
                 }
+                loadUsers(users.offset);
             }
         });
 
