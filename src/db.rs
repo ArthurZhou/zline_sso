@@ -432,6 +432,59 @@ pub fn list_users(
     Ok(users)
 }
 
+/// 查询已带标签的用户列表（staff 标签管理使用）。
+///
+/// 仅返回至少带有一个非基线角色/标签（即 `role` 非空且不等于基线 `user`）的用户，
+/// 避免向 staff 暴露完整用户列表。
+///
+/// # 参数
+/// - `conn`: 数据库连接
+/// - `keyword`: 搜索关键字（用户名/姓名/外部ID 模糊匹配）
+/// - `limit`: 每页条数
+/// - `offset`: 偏移量（用于分页）
+///
+/// # 返回值
+/// - `Ok(Vec<UserInfo>)`: 用户列表
+pub fn list_tagged_users(
+    conn: &DbConn,
+    keyword: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<UserInfo>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT uid, username, role, external_uid, full_name, student_id, gender, flag, state, \
+         state_description, restriction_end_time, last_login_time, failed_attempts \
+         FROM users \
+         WHERE (role IS NOT NULL AND role != '' AND role != 'user') \
+           AND (?1 = '' OR username LIKE '%'||?1||'%' OR full_name LIKE '%'||?1||'%' OR external_uid LIKE '%'||?1||'%') \
+         ORDER BY last_login_time DESC \
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![keyword, limit, offset], |row| {
+        Ok(UserInfo {
+            uid: row.get(0)?,
+            username: row.get(1)?,
+            role: row.get(2)?,
+            external_uid: row.get(3)?,
+            full_name: row.get(4)?,
+            student_id: row.get(5)?,
+            gender: row.get(6)?,
+            flag: row.get(7)?,
+            state: row.get(8)?,
+            state_description: row.get(9)?,
+            restriction_end_time: row.get(10)?,
+            last_login_time: row.get(11)?,
+            failed_attempts: row.get(12)?,
+        })
+    })?;
+
+    let mut users = Vec::new();
+    for row in rows {
+        users.push(row?);
+    }
+    Ok(users)
+}
+
 /// 设置用户角色（管理员使用）。
 ///
 /// # 参数

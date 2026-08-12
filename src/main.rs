@@ -136,6 +136,8 @@ struct AdminAddUserRequest {
 struct TagManageRequest {
     username: String,
     tag: String,
+    /// 目标用户姓名（添加标签时用于确认用户身份，防止误加到他人）
+    full_name: Option<String>,
 }
 
 /// 校验并规范化角色字符串（逗号分隔的多角色）。
@@ -1530,8 +1532,9 @@ async fn profile_tags_handler(
     .into_response()
 }
 
-/// 员工标签管理：查询用户列表（仅 staff 用户可用）。
+/// 员工标签管理：查询已带标签的用户列表（仅 staff 用户可用）。
 ///
+/// 仅返回至少带有一个非基线标签的用户，不向 staff 暴露完整用户列表。
 /// Query 参数：`keyword`、`limit`、`offset`。
 async fn profile_tag_users_handler(
     State(state): State<Arc<AppState>>,
@@ -1559,7 +1562,7 @@ async fn profile_tag_users_handler(
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
 
-    let users = match db::list_users(&conn, &keyword, limit, offset) {
+    let users = match db::list_tagged_users(&conn, &keyword, limit, offset) {
         Ok(u) => u,
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
@@ -1580,14 +1583,15 @@ async fn profile_tag_users_handler(
 
 /// 员工标签管理：为其他用户添加标签。
 ///
-/// Body：`{ "username": 目标用户, "tag": 要添加的标签 }`。
-/// 仅允许添加当前 staff 用户自带的标签（不含 `staff` / `admin`）。
+/// Body：`{ "username": 目标用户, "full_name": 目标姓名, "tag": 要添加的标签 }`。
+/// 服务端会按「用户名 + 姓名」双重确认目标用户，避免误加到他人。
+/// 仅允许添加当前 staff 用户自带的标签（不含 `user` / `staff` / `admin`），且不能给自己添加。
 async fn profile_tag_add_handler(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Json(payload): Json<TagManageRequest>,
 ) -> Response {
-    let (_me, manageable) = match require_tag_manager(&state, &jar) {
+    let (me, manageable) = match require_tag_manager(&state, &jar) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -1601,6 +1605,20 @@ async fn profile_tag_add_handler(
     if target_username.is_empty() {
         return Json(json!({"error": "用户名不能为空"})).into_response();
     }
+    if target_username == me {
+        return Json(json!({"error": "不能给自己添加标签"})).into_response();
+    }
+
+    // 添加标签必须提供目标姓名，服务端核对后再操作
+    let full_name = payload
+        .full_name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if full_name.is_empty() {
+        return Json(json!({"error": "请填写目标用户的姓名"})).into_response();
+    }
 
     let conn = match state.db_pool.get() {
         Ok(c) => c,
@@ -1611,6 +1629,14 @@ async fn profile_tag_add_handler(
         Ok(Some(u)) => u,
         _ => return Json(json!({"error": "用户不存在"})).into_response(),
     };
+
+    // 姓名核对：与数据库中记录完全一致
+    if target.full_name.trim() != full_name {
+        return Json(json!({
+            "error": "用户名与姓名不匹配，请核对后再试"
+        }))
+        .into_response();
+    }
 
     if has_role(&target.role, &tag) {
         return Json(json!({
@@ -1626,7 +1652,7 @@ async fn profile_tag_add_handler(
 
     Json(json!({
         "success": true,
-        "message": format!("已为 {} 添加标签 {}", target_username, tag)
+        "message": format!("已为 {}（{}）添加标签 {}", target_username, target.full_name, tag)
     }))
     .into_response()
 }
@@ -1634,13 +1660,13 @@ async fn profile_tag_add_handler(
 /// 员工标签管理：移除其他用户的标签。
 ///
 /// Body：`{ "username": 目标用户, "tag": 要移除的标签 }`。
-/// 仅允许移除当前 staff 用户自带的标签（不含 `staff` / `admin`）。
+/// 仅允许移除当前 staff 用户自带的标签（不含 `user` / `staff` / `admin`），且不能移除自己的标签。
 async fn profile_tag_remove_handler(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Json(payload): Json<TagManageRequest>,
 ) -> Response {
-    let (_me, manageable) = match require_tag_manager(&state, &jar) {
+    let (me, manageable) = match require_tag_manager(&state, &jar) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -1653,6 +1679,10 @@ async fn profile_tag_remove_handler(
     let target_username = payload.username.trim().to_string();
     if target_username.is_empty() {
         return Json(json!({"error": "用户名不能为空"})).into_response();
+    }
+    // staff 不能移除自己的标签
+    if target_username == me {
+        return Json(json!({"error": "不能移除自己的标签"})).into_response();
     }
 
     let conn = match state.db_pool.get() {

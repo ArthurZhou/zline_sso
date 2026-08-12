@@ -216,6 +216,20 @@
         }
 
         /* 标签管理 */
+        .tag-subtitle {
+            margin: 14px 0 10px 0;
+            font-size: 12px;
+            text-transform: uppercase;
+            font-weight: 700;
+            color: var(--muted);
+            border-bottom: 1px dashed var(--border);
+            padding-bottom: 6px;
+        }
+
+        .tag-subtitle:first-of-type {
+            margin-top: 0;
+        }
+
         .tag-toolbar {
             display: flex;
             gap: 10px;
@@ -420,6 +434,21 @@
             <div class="card hidden" id="tagManageCard" style="grid-column: 1 / -1;">
                 <h2>标签管理</h2>
                 <p class="sync-note" id="tagManageHint"></p>
+
+                <!-- 添加标签：用户名 + 姓名双重确认 -->
+                <h3 class="tag-subtitle">添加标签</h3>
+                <div class="tag-toolbar">
+                    <input type="text" id="tagAddUsername" class="tag-input" placeholder="目标用户名">
+                    <input type="text" id="tagAddFullname" class="tag-input" placeholder="目标姓名（需与系统记录一致）">
+                    <select id="tagAddTag" class="tag-input" style="flex:0 0 auto;min-width:120px;"></select>
+                    <button class="btn btn-tag" id="tagAddBtn">添加</button>
+                </div>
+                <p class="sync-note">
+                    填写目标用户的“用户名 + 姓名”并提交，服务端核对无误后才会添加所选标签，避免加错人。
+                </p>
+
+                <!-- 已加标签的用户 -->
+                <h3 class="tag-subtitle">已加标签的用户</h3>
                 <div class="tag-toolbar">
                     <input type="text" id="tagKeyword" class="tag-input" placeholder="搜索 用户名 / 姓名">
                     <button class="btn btn-tag" id="tagSearchBtn">查询</button>
@@ -537,7 +566,7 @@
         }
 
         // ---- 标签管理（staff）----
-        const tagState = { keyword: '', offset: 0, limit: 50, hasMore: false, manageable: [] };
+        const tagState = { me: '', keyword: '', offset: 0, limit: 50, hasMore: false, manageable: [] };
 
         function showTagMsg(text, isError) {
             const el = document.getElementById('tagMsg');
@@ -553,11 +582,17 @@
                 const r = await fetch(`${AUTH_PATH}/profile/tags`);
                 const d = await r.json();
                 if (d.error || !d.can_manage) return;
+                tagState.me = data.username;
                 tagState.manageable = d.manageable_tags || [];
                 if (!tagState.manageable.length) return;
+
+                // 填充可添加的标签下拉框
+                const sel = document.getElementById('tagAddTag');
+                sel.innerHTML = tagState.manageable.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+
                 document.getElementById('tagManageHint').textContent =
                     '您可以管理的标签：' + tagState.manageable.join('、') +
-                    '。可为其他用户添加或移除这些标签。';
+                    '。可为他人的账户添加/移除这些标签，但您不能修改自己的标签，也不会看到未打标签的用户。';
                 card.classList.remove('hidden');
                 loadTagUsers(0);
             } catch (e) {
@@ -586,7 +621,7 @@
         function renderTagUsers(list) {
             const wrap = document.getElementById('tagUserList');
             if (!list.length) {
-                wrap.innerHTML = '<div class="empty">没有找到用户</div>';
+                wrap.innerHTML = '<div class="empty">暂无已加标签的用户</div>';
                 return;
             }
             let html = '<table class="tag-table"><thead><tr><th>用户名</th><th>姓名</th><th>标签</th><th>操作</th></tr></thead><tbody>';
@@ -595,11 +630,17 @@
                 const badges = roles.length
                     ? roles.map(r => `<span class="tag-badge">${escapeHtml(r)}</span>`).join(' ')
                     : '<span style="color:var(--muted)">-</span>';
-                const ops = tagState.manageable.map(t => {
-                    const has = roles.includes(t);
-                    const act = has ? 'remove' : 'add';
-                    return `<button class="btn btn-tag btn-sm" data-tagact="${act}" data-username="${escapeHtml(u.username)}" data-tag="${escapeHtml(t)}">${has ? '移除 ' : '添加 '}${escapeHtml(t)}</button>`;
-                }).join(' ') || '<span style="color:var(--muted)">无可管理标签</span>';
+                // 自己的行不提供任何操作（staff 不能修改自己的标签）
+                let ops;
+                if (u.username === tagState.me) {
+                    ops = '<span style="color:var(--muted)">（自己）</span>';
+                } else {
+                    // 仅提供移除按钮：添加标签需通过上方表单填写用户名+姓名确认
+                    ops = tagState.manageable
+                        .filter(t => roles.includes(t))
+                        .map(t => `<button class="btn btn-tag btn-sm" data-tagact="remove" data-username="${escapeHtml(u.username)}" data-tag="${escapeHtml(t)}">移除 ${escapeHtml(t)}</button>`)
+                        .join(' ') || '<span style="color:var(--muted)">-</span>';
+                }
                 html += `<tr>
                     <td><strong>${escapeHtml(u.username)}</strong></td>
                     <td>${escapeHtml(u.full_name) || '-'}</td>
@@ -624,6 +665,30 @@
                 const d = await r.json();
                 if (d.error) showTagMsg(d.error, true);
                 else { showTagMsg(d.message || '操作成功'); loadTagUsers(tagState.offset); }
+            } catch (e) {
+                showTagMsg('网络错误', true);
+            }
+        }
+
+        // 通过“用户名 + 姓名”添加标签（服务端核对身份）
+        async function doAddTag() {
+            const username = document.getElementById('tagAddUsername').value.trim();
+            const full_name = document.getElementById('tagAddFullname').value.trim();
+            const tag = document.getElementById('tagAddTag').value;
+            if (!username) { showTagMsg('请填写目标用户名', true); return; }
+            if (!full_name) { showTagMsg('请填写目标姓名', true); return; }
+            try {
+                const r = await fetch(`${AUTH_PATH}/profile/tags/add`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, full_name, tag }),
+                });
+                const d = await r.json();
+                if (d.error) { showTagMsg(d.error, true); return; }
+                showTagMsg(d.message || '已添加');
+                document.getElementById('tagAddUsername').value = '';
+                document.getElementById('tagAddFullname').value = '';
+                loadTagUsers(0);
             } catch (e) {
                 showTagMsg('网络错误', true);
             }
@@ -716,6 +781,10 @@
                 doTagAction(btn.dataset.username, btn.dataset.tag, btn.dataset.tagact);
                 return;
             }
+        });
+
+        document.getElementById('tagAddBtn').addEventListener('click', () => {
+            doAddTag();
         });
 
         document.getElementById('tagSearchBtn').addEventListener('click', () => {

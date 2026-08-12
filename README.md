@@ -116,10 +116,15 @@ sequenceDiagram
 ### staff 标签管理（个人中心）
 
 普通（非管理员）用户若带有 `staff` 标签，进入个人中心后会出现「标签管理」卡片，
-可搜索用户并为其他用户**添加/移除其自身携带的标签**。
+可为他人的账户**添加/移除其自身携带的标签**。限制规则：
 
-- 可管理的标签 = 该用户自身角色中除 `staff`、`admin` 之外的所有标签。
-  例如用户 A 的角色为 `tag-a,staff,tag-b`，则 A 可以给其他人添加或移除 `tag-a` 与 `tag-b`。
+- **可管理的标签** = 该用户自身角色中除 `user`、`staff`、`admin` 之外的所有标签。
+  例如用户 A 的角色为 `tag-a,staff,tag-b`，则 A 只能操作 `tag-a` 与 `tag-b`。
+- **不能修改自己的标签**：staff 无法给自己添加或移除标签（后端强制校验）。
+- **看不到完整用户列表**：`/profile/tags/users` 仅返回**已带标签**的用户
+  （即角色非空且不等于基线 `user` 的用户）。
+- **添加标签需双重确认**：staff 填写目标用户的“用户名 + 姓名”提交，
+  服务端核对姓名与库中记录一致后才添加，避免加错人。
 - `staff` 与 `admin` 标签不可被 staff 用户授予/移除，防止提权。
 - 管理员会话不参与标签管理（使用管理控制台）。
 
@@ -128,9 +133,9 @@ sequenceDiagram
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
 | `{prefix}/profile/tags` | GET | 当前用户的标签管理信息（`can_manage`、`manageable_tags`） |
-| `{prefix}/profile/tags/users` | GET | 搜索用户列表（`keyword`/`limit`/`offset`） |
-| `{prefix}/profile/tags/add` | POST | 为其他用户添加标签（Body：`{"username","tag"}`） |
-| `{prefix}/profile/tags/remove` | POST | 移除其他用户的标签（Body：`{"username","tag"}`） |
+| `{prefix}/profile/tags/users` | GET | 已带标签的用户列表（`keyword`/`limit`/`offset`） |
+| `{prefix}/profile/tags/add` | POST | 添加标签（Body：`{"username","full_name","tag"}`，服务端核对姓名） |
+| `{prefix}/profile/tags/remove` | POST | 移除标签（Body：`{"username","tag"}`，不可操作自己） |
 
 ### 管理控制台：用户增删
 
