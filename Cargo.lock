@@ -2999,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "zline_sso"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "aes-gcm",
  "axum",
