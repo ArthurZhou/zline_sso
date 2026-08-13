@@ -432,14 +432,18 @@ pub fn list_users(
     Ok(users)
 }
 
-/// 查询已带标签的用户列表（staff 标签管理使用）。
+/// 查询当前 staff 可查看/可操作的带标签用户列表（staff 标签管理使用）。
 ///
 /// 仅返回至少带有一个非基线角色/标签（即 `role` 非空且不等于基线 `user`）的用户，
-/// 避免向 staff 暴露完整用户列表。
+/// 且满足以下限制：
+/// - 用户必须带有 `manageable_tags` 中的至少一个标签（与当前 staff 共享标签）；
+/// - 排除本身带 `staff` 标签的用户（staff 不能对其他 staff 进行添加/移除操作，
+///   也不应看到其他 staff 的身份）。
 ///
 /// # 参数
 /// - `conn`: 数据库连接
 /// - `keyword`: 搜索关键字（用户名/姓名/外部ID 模糊匹配）
+/// - `manageable_tags`: 当前 staff 可管理的标签列表（其自身除 `user`/`staff`/`admin` 外的标签）
 /// - `limit`: 每页条数
 /// - `offset`: 偏移量（用于分页）
 ///
@@ -448,19 +452,50 @@ pub fn list_users(
 pub fn list_tagged_users(
     conn: &DbConn,
     keyword: &str,
+    manageable_tags: &[String],
     limit: i64,
     offset: i64,
 ) -> Result<Vec<UserInfo>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+    // 无任何可管理标签时，staff 看不到任何用户
+    if manageable_tags.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut sql = String::from(
         "SELECT uid, username, role, external_uid, full_name, student_id, gender, flag, state, \
          state_description, restriction_end_time, last_login_time, failed_attempts \
          FROM users \
          WHERE (role IS NOT NULL AND role != '' AND role != 'user') \
-           AND (?1 = '' OR username LIKE '%'||?1||'%' OR full_name LIKE '%'||?1||'%' OR external_uid LIKE '%'||?1||'%') \
+           AND (',' || role || ',') NOT LIKE '%,staff,%' \
+           AND (",
+    );
+
+    // ?1 keyword, ?2 limit, ?3 offset；标签条件从 ?4 开始
+    let mut params: Vec<rusqlite::types::Value> = vec![
+        keyword.to_string().into(),
+        limit.into(),
+        offset.into(),
+    ];
+
+    for (i, tag) in manageable_tags.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(" OR ");
+        }
+        // 以逗号包裹后精确匹配单个标签，避免 `a` 误匹配 `ab` 等前缀
+        sql.push_str("(',' || role || ',') LIKE '%,' || ?");
+        sql.push_str(&(4 + i).to_string());
+        sql.push_str(" || ',%'");
+        params.push(tag.clone().into());
+    }
+
+    sql.push_str(
+        ") AND (?1 = '' OR username LIKE '%'||?1||'%' OR full_name LIKE '%'||?1||'%' OR external_uid LIKE '%'||?1||'%') \
          ORDER BY last_login_time DESC \
          LIMIT ?2 OFFSET ?3",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![keyword, limit, offset], |row| {
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
         Ok(UserInfo {
             uid: row.get(0)?,
             username: row.get(1)?,

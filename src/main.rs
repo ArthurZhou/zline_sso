@@ -1534,16 +1534,18 @@ async fn profile_tags_handler(
 
 /// 员工标签管理：查询已带标签的用户列表（仅 staff 用户可用）。
 ///
-/// 仅返回至少带有一个非基线标签的用户，不向 staff 暴露完整用户列表。
+/// 仅返回与当前 staff 共享至少一个可管理标签、且本身不带 `staff` 标签的用户，
+/// 并只暴露该 staff 可管理的标签（与其自带标签求交集），避免泄露其无权查看的标签。
 /// Query 参数：`keyword`、`limit`、`offset`。
 async fn profile_tag_users_handler(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = require_tag_manager(&state, &jar) {
-        return resp;
-    }
+    let (_, manageable) = match require_tag_manager(&state, &jar) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
 
     let keyword = params.get("keyword").cloned().unwrap_or_default();
     let limit: i64 = params
@@ -1562,7 +1564,7 @@ async fn profile_tag_users_handler(
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
 
-    let users = match db::list_tagged_users(&conn, &keyword, limit, offset) {
+    let users = match db::list_tagged_users(&conn, &keyword, &manageable, limit, offset) {
         Ok(u) => u,
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
@@ -1570,10 +1572,16 @@ async fn profile_tag_users_handler(
     let list: Vec<_> = users
         .iter()
         .map(|u| {
+            // 仅暴露该 staff 可管理的标签：与自身标签求交集，
+            // 避免泄露其无权查看的标签（如 tag-c）。
+            let visible_tags: Vec<String> = parse_roles(&u.role)
+                .into_iter()
+                .filter(|r| manageable.iter().any(|m| m == r))
+                .collect();
             json!({
                 "username": u.username,
                 "full_name": u.full_name,
-                "role": u.role,
+                "role": visible_tags.join(","),
             })
         })
         .collect();
@@ -1638,6 +1646,11 @@ async fn profile_tag_add_handler(
         .into_response();
     }
 
+    // staff 不能对其他带 staff 标签的用户执行添加操作
+    if has_role(&target.role, "staff") {
+        return Json(json!({"error": "不能对 staff 用户添加标签"})).into_response();
+    }
+
     if has_role(&target.role, &tag) {
         return Json(json!({
             "error": format!("用户 {} 已拥有标签 {}", target_username, tag)
@@ -1694,6 +1707,11 @@ async fn profile_tag_remove_handler(
         Ok(Some(u)) => u,
         _ => return Json(json!({"error": "用户不存在"})).into_response(),
     };
+
+    // staff 不能对其他带 staff 标签的用户执行移除操作
+    if has_role(&target.role, "staff") {
+        return Json(json!({"error": "不能对 staff 用户移除标签"})).into_response();
+    }
 
     if !has_role(&target.role, &tag) {
         return Json(json!({

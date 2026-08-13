@@ -323,6 +323,28 @@
             justify-content: flex-end;
         }
 
+        /* 横屏 / 宽屏：基本信息与账户状态在左列上下排列，登录日志在右列撑满两格 */
+        @media (min-width: 900px) and (orientation: landscape) {
+            .profile-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .card-basic {
+                grid-column: 1;
+                grid-row: 1;
+            }
+
+            .card-status {
+                grid-column: 1;
+                grid-row: 2;
+            }
+
+            .card-log {
+                grid-column: 2;
+                grid-row: 1 / span 2;
+            }
+        }
+
         @media (max-width: 600px) {
             .header {
                 flex-direction: column;
@@ -354,7 +376,7 @@
         <div id="statusView" class="loading">加载中...</div>
 
         <div id="profileContent" class="profile-grid hidden">
-            <div class="card">
+            <div class="card card-basic">
                 <h2>基本信息</h2>
                 <div class="info-row">
                     <span class="info-label">用户名</span>
@@ -386,15 +408,11 @@
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card card-status">
                 <h2>账户状态</h2>
                 <div class="info-row">
                     <span class="info-label">状态</span>
                     <span id="val-status">-</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">账号标记</span>
-                    <span id="val-flag" class="info-value">-</span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">角色</span>
@@ -409,7 +427,7 @@
                     <span id="val-restriction-end" class="info-value">-</span>
                 </div>
             </div>
-            <div class="card">
+            <div class="card card-log">
                 <h2>登录日志</h2>
                 <div class="info-row">
                     <span class="info-label">最近登录时间</span>
@@ -522,7 +540,6 @@
             document.getElementById('val-gender').textContent = data.gender || '-';
             document.getElementById('val-extid').textContent = data.external_uid || '-';
             document.getElementById('val-role').textContent = data.role;
-            document.getElementById('val-flag').textContent = data.flag != null ? String(data.flag) : '-';
             document.getElementById('val-last-login').textContent = formatLocalTime(data.last_login_time) || '-';
 
             // 状态标签逻辑
@@ -585,8 +602,7 @@
                 sel.innerHTML = tagState.manageable.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
 
                 document.getElementById('tagManageHint').textContent =
-                    '您可以管理的标签：' + tagState.manageable.join('、') +
-                    '。可为他人的账户添加/移除这些标签，但您不能修改自己的标签，也不会看到未打标签的用户。';
+                    '您可以管理的标签：' + tagState.manageable.join('、') + '。';
                 card.classList.remove('hidden');
                 loadTagUsers(0);
             } catch (e) {
