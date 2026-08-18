@@ -20,10 +20,6 @@ cors_allowed_origins = [
     "http://127.0.0.1:8080",
 ]
 
-# 会话 Cookie 是否带 Secure 标志（部署在 HTTPS 反代后时必须设为 true；
-# 纯 HTTP 内网部署保持 false，否则 Cookie 不会发送）
-cookie_secure = false
-
 # 前端登录负载 AES-256-GCM 共享密钥及允许的时钟偏差
 [frontend_crypto]
 shared_key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
@@ -44,8 +40,8 @@ lockout_duration_minutes = 30
 # 或 Python: python -c "import hashlib; print(hashlib.sha256(b'你的密码').hexdigest())"
 [admin]
 username = "320241141"
-# 随机生成的强密码（每次部署请重新生成），生成方式同下方注释
-password_hash = "4d65b64e324d3c0b7619410326fdf548b98a41100f1cab6a967b2016b2a8aa1b"
+# 默认密码为 "admin"，请务必修改
+password_hash = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
 
 # 已注册 OIDC 客户端
 # redirect_uris 支持两种写法：
@@ -64,27 +60,4 @@ return_extra_userinfo = [
     "full_name",
     "student_id",
     "gender",
-    "role",
-]
-
-# oneshare 客户端（OIDC 对接）
-# oneshare 侧 [oidc] 配置：
-#   issuer_url = "http://127.0.0.1:8097"          （与上方 issuer 一致）
-#   client_id = "oneshare"
-#   client_secret = "gSumRHZDEcuImSBI9Ps0KKdEVVDT7KFZ"
-#   redirect_uri = "http://127.0.0.1:3456/auth/callback"
-# 端点可全部走 discovery（/.well-known/openid-configuration），无需显式配置
-[[clients]]
-client_id = "oneshare"
-client_secret = "gSumRHZDEcuImSBI9Ps0KKdEVVDT7KFZ"
-redirect_uris = [
-    "http://127.0.0.1:3456/auth/callback",
-]
-# role 必须返回：oneshare 用 userinfo 的 role claim 自动加入对应分组
-return_extra_userinfo = [
-    "external_uid",
-    "full_name",
-    "student_id",
-    "gender",
-    "role",
 ]
