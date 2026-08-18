@@ -254,6 +254,37 @@ pub fn record_login_failure(
     Ok(())
 }
 
+/// 重置用户的连续登录失败次数（解封/成功后调用）。
+pub fn reset_failed_attempts(conn: &DbConn, uid: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE users SET failed_attempts=0 WHERE uid=?1",
+        [uid],
+    )?;
+    Ok(())
+}
+
+/// 记录管理员登录尝试（成功或失败）。
+///
+/// 管理员凭据在本地验证、不在 users 表中，故 uid 使用 `admin:<username>` 前缀，
+/// 与普通用户区分；`list_all_login_logs` 对 admin: 前缀的记录直接显示该 uid。
+pub fn log_admin_attempt(
+    conn: &DbConn,
+    username: &str,
+    ip_address: &str,
+    country: &str,
+    region: &str,
+    success: i32,
+) -> Result<(), rusqlite::Error> {
+    log_login_attempt(
+        conn,
+        &format!("admin:{}", username),
+        ip_address,
+        country,
+        region,
+        success,
+    )
+}
+
 /// 设置用户限制状态及结束时间
 ///
 /// 更新用户的状态、状态描述和限制结束时间。
@@ -600,9 +631,9 @@ pub fn list_all_login_logs(
     offset: i64,
 ) -> Result<Vec<AllLoginLog>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT u.username, l.success, l.ip_address, l.country, l.region, l.timestamp \
-         FROM login_logs l JOIN users u ON u.uid = l.uid \
-         WHERE (?1 = '' OR u.username LIKE '%'||?1||'%') \
+        "SELECT COALESCE(u.username, l.uid), l.success, l.ip_address, l.country, l.region, l.timestamp \
+         FROM login_logs l LEFT JOIN users u ON u.uid = l.uid \
+         WHERE (?1 = '' OR u.username LIKE '%'||?1||'%' OR l.uid LIKE '%'||?1||'%') \
          ORDER BY l.timestamp DESC \
          LIMIT ?2 OFFSET ?3",
     )?;

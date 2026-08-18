@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::cors::CorsLayer;
@@ -38,6 +38,9 @@ use uuid::Uuid;
 const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 3600); // 会话 7 天
 const CODE_TTL: Duration = Duration::from_secs(300); // 授权码 5 分钟
 const GEOIP_CACHE_MAX: usize = 10_000;
+// 内存 store 硬上限：超过时先清理过期项再写入，防止被并发请求灌爆内存
+const SESSION_STORE_MAX: usize = 100_000;
+const CODE_STORE_MAX: usize = 50_000;
 
 #[derive(Deserialize, Clone)]
 struct Config {
@@ -53,6 +56,8 @@ struct Config {
     cors_allowed_origins: Vec<String>,
     admin: AdminConfig,
     clients: Vec<ClientConfig>,
+    /// 会话 Cookie 是否带 Secure 标志（部署在 HTTPS 反代后时应设为 true）
+    cookie_secure: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -219,8 +224,17 @@ struct IdTokenClaims {
 struct AuthSession {
     username: String,
     client_id: String,
+    /// 授权请求实际使用的 redirect_uri（token 交换时必须精确一致，见 OIDC Core 3.1.3.5）
+    redirect_uri: String,
     nonce: Option<String>,
     created_at: SystemTime,
+}
+
+/// 管理员密码登录的内存锁定状态（管理员凭据不走外部验证，故与普通用户锁定分开）
+#[derive(Default)]
+struct AdminLockout {
+    failed: i32,
+    locked_until: Option<Instant>,
 }
 
 struct SessionData {
@@ -247,6 +261,7 @@ struct AppState {
     db_pool: db::DbPool,
     geoip_reader: Option<Arc<Reader<Vec<u8>>>>,
     geoip_cache: Mutex<HashMap<String, GeoLocation>>,
+    admin_lockout: Mutex<AdminLockout>,
 }
 
 impl AppState {
@@ -553,43 +568,106 @@ async fn login_handler(
     // 记住登录状态的选项
     let remember = payload.remember.unwrap_or(false);
 
-    // 管理员账户本地预检：在发往外部（进才）验证之前先校验，
-    // 命中管理员账户则直接完成登录，避免管理员凭据泄漏到进才系统。
-    if state.is_admin(&user, &pass) {
-        // 管理员账户仅允许用户中心（直接）登录，不允许 OAuth 授权
-        if !is_direct_login {
-            return Json(
-                json!({"error": "管理员账户不允许OAuth授权，请在用户中心直接登录"}),
-            )
-            .into_response();
+    // 管理员账户本地预检：管理员凭据验证完全本地完成（绝不下发到进才），
+    // 且带失败计数锁定，防止对管理员密码的暴力破解。
+    // 行为变更：用户名命中 admin.username 后只接受管理员密码，不再回落进才验证。
+    if user == state.config.admin.username {
+        let mut lock = state.admin_lockout.lock().unwrap();
+        if let Some(until) = lock.locked_until {
+            if Instant::now() < until {
+                return Json(json!({"error": "管理员账户已临时锁定，请稍后再试"}))
+                    .into_response();
+            }
+            lock.locked_until = None;
+            lock.failed = 0;
         }
 
-        // 管理员直接登录用户中心（adminui）
-        let session_id = Uuid::new_v4().to_string();
-        state.session_store.lock().unwrap().insert(
-            session_id.clone(),
-            SessionData {
-                username: user.clone(),
-                is_admin: true,
-                created_at: std::time::SystemTime::now(),
-            },
-        );
+        if state.is_admin(&user, &pass) {
+            lock.failed = 0;
+            lock.locked_until = None;
+            drop(lock);
 
-        let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
-        info!(username = %user, ip = %client_ip, "管理员登录成功");
-        return (
-            jar.add(create_sso_cookie(
-                axum::extract::State(state.clone()),
-                session_id,
-                remember,
-            )),
-            Json(json!({
-                "code": "profile",
-                "redirect_uri": redirect_uri,
-                "is_direct_login": true
-            })),
+            // 审计：记录管理员登录成功（uid 用 admin: 前缀，避免与普通用户混淆）
+            if let Ok(conn) = state.db_pool.get() {
+                if let Err(e) = db::log_admin_attempt(
+                    &conn,
+                    &user,
+                    &client_ip,
+                    &geo_location.country,
+                    &geo_location.region,
+                    1,
+                ) {
+                    warn!(error = %e, "管理员审计写入失败");
+                }
+            }
+
+            // 管理员账户仅允许用户中心（直接）登录，不允许 OAuth 授权
+            if !is_direct_login {
+                return Json(
+                    json!({"error": "管理员账户不允许OAuth授权，请在用户中心直接登录"}),
+                )
+                .into_response();
+            }
+
+            // 管理员直接登录用户中心（adminui）
+            let session_id = Uuid::new_v4().to_string();
+            insert_session(
+                &state,
+                session_id.clone(),
+                SessionData {
+                    username: user.clone(),
+                    is_admin: true,
+                    created_at: std::time::SystemTime::now(),
+                },
+            );
+
+            let redirect_uri = format!("{}/profile", state.config.auth_path_prefix);
+            info!(username = %user, ip = %client_ip, "管理员登录成功");
+            return (
+                jar.add(create_sso_cookie(
+                    axum::extract::State(state.clone()),
+                    session_id,
+                    remember,
+                )),
+                Json(json!({
+                    "code": "profile",
+                    "redirect_uri": redirect_uri,
+                    "is_direct_login": true
+                })),
+            )
+                .into_response();
+        }
+
+        // 管理员密码错误：计数 + 审计，达到阈值锁定
+        lock.failed += 1;
+        let threshold = state.config.account_lockout.failed_attempts_threshold;
+        let lockout_mins = state.config.account_lockout.lockout_duration_minutes;
+        let remaining = threshold - lock.failed;
+        drop(lock);
+
+        if let Ok(conn) = state.db_pool.get() {
+            if let Err(e) = db::log_admin_attempt(
+                &conn,
+                &user,
+                &client_ip,
+                &geo_location.country,
+                &geo_location.region,
+                0,
+            ) {
+                warn!(error = %e, "管理员审计写入失败");
+            }
+        }
+        warn!(username = %user, ip = %client_ip, failed_attempts = remaining, "管理员登录失败");
+
+        if remaining <= 0 {
+            state.admin_lockout.lock().unwrap().locked_until =
+                Some(Instant::now() + Duration::from_secs(lockout_mins as u64 * 60));
+            return Json(json!({"error": "管理员密码错误次数过多，账户已锁定"})).into_response();
+        }
+        return Json(
+            json!({"error": format!("管理员密码错误（还可尝试 {} 次）", remaining)}),
         )
-            .into_response();
+        .into_response();
     }
 
     let db_conn = match state.db_pool.get() {
@@ -599,7 +677,7 @@ async fn login_handler(
 
     // 查询用户本地信息（一次查询获取所有字段）
     let user = user.to_string();
-    let user_info = match db::get_user_full_info(&db_conn, &user) {
+    let mut user_info = match db::get_user_full_info(&db_conn, &user) {
         Ok(Some(info)) => info,
         Ok(None) => {
             new_user_record = true;
@@ -613,7 +691,7 @@ async fn login_handler(
         }
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
-    let (user_state, user_flag): (UserState, UserFlag) = (
+    let (mut user_state, user_flag): (UserState, UserFlag) = (
         user_info.state.try_into().unwrap_or_default(),
         user_info.flag.try_into().unwrap_or_default(),
     );
@@ -629,8 +707,12 @@ async fn login_handler(
             chrono::DateTime::parse_from_rfc3339(user_info.restriction_end_time.as_ref().unwrap())
         {
             if chrono::Utc::now() > end_time.with_timezone(&chrono::Utc) {
-                // 解除限制
+                // 解除限制：刷新本次请求的状态并重置失败计数（含内存中的副本），
+                // 避免本次请求的失败路径用旧计数再次触发锁定
                 let _ = db::set_user_state(&db_conn, &user_info.uid, UserState::Normal, "", "");
+                let _ = db::reset_failed_attempts(&db_conn, &user_info.uid);
+                user_info.failed_attempts = 0;
+                user_state = UserState::Normal;
             }
         }
     }
@@ -672,7 +754,8 @@ async fn login_handler(
 
                     // 生成session ID并存储用户信息
                     let session_id = Uuid::new_v4().to_string();
-                    state.session_store.lock().unwrap().insert(
+                    insert_session(
+                        &state,
                         session_id.clone(),
                         SessionData {
                             username: user.clone(),
@@ -783,7 +866,8 @@ async fn login_handler(
 
                         // 生成session ID并存储
                         let session_id = Uuid::new_v4().to_string();
-                        state.session_store.lock().unwrap().insert(
+                        insert_session(
+                            &state,
                             session_id.clone(),
                             SessionData {
                                 username: user.clone(),
@@ -856,7 +940,8 @@ async fn login_handler(
         UserState::BypassExternal => {
             // 跳过外部验证，直接登录
             let session_id = Uuid::new_v4().to_string();
-            state.session_store.lock().unwrap().insert(
+            insert_session(
+                &state,
                 session_id.clone(),
                 SessionData {
                     username: user.clone(),
@@ -923,7 +1008,7 @@ async fn continue_handler(
             .iter()
             .any(|pattern| redirect_matches(pattern, redirect_uri));
         if !redirect_ok {
-            return Json(json!({"error": "OAuth客户端ID错误"})).into_response();
+            return Json(json!({"error": "OAuth重定向URI错误"})).into_response();
         }
     }
 
@@ -957,7 +1042,7 @@ async fn continue_handler(
         Err(_) => return Json(json!({"error": "内部错误"})).into_response(),
     };
 
-    let user_state = user_info.state.try_into().unwrap_or_default();
+    let mut user_state = user_info.state.try_into().unwrap_or_default();
     if (user_state == UserState::Restricted || user_state == UserState::Locked)
         && user_info.restriction_end_time.is_some()
     {
@@ -966,8 +1051,10 @@ async fn continue_handler(
             chrono::DateTime::parse_from_rfc3339(user_info.restriction_end_time.as_ref().unwrap())
         {
             if chrono::Utc::now() > end_time.with_timezone(&chrono::Utc) {
-                // 解除限制
+                // 解除限制：刷新本次请求的状态并重置失败计数
                 let _ = db::set_user_state(&db_conn, &user_info.uid, UserState::Normal, "", "");
+                let _ = db::reset_failed_attempts(&db_conn, &user_info.uid);
+                user_state = UserState::Normal;
             }
         }
     }
@@ -1798,7 +1885,8 @@ async fn token_exchange_handler(
         .into_response();
     }
 
-    // OIDC 要求在 token 请求中携带 redirect_uri，且必须与授权请求时一致
+    // OIDC Core 3.1.3.5：token 请求中的 redirect_uri 必须与授权请求使用的
+    // redirect_uri 精确一致（授权时已按客户端配置校验过）。
     let requested_redirect = match &payload.redirect_uri {
         Some(uri) => uri,
         None => {
@@ -1830,6 +1918,14 @@ async fn token_exchange_handler(
         .into_response();
     }
 
+    if session.redirect_uri != *requested_redirect {
+        return Json(json!({
+            "error": "invalid_grant",
+            "error_description": "OAuth重定向URI与授权请求不一致"
+        }))
+        .into_response();
+    }
+
     // 授权码有效期校验
     if session
         .created_at
@@ -1844,28 +1940,7 @@ async fn token_exchange_handler(
         .into_response();
     }
 
-    // redirect_uri 校验：按该客户端配置的条目进行匹配（字面量精确匹配或正则匹配），
-    // 兼容授权请求时实际使用的 redirect_uri，避免过于严格的精确比较导致校验失败。
-    let redirect_ok = state
-        .config
-        .clients
-        .iter()
-        .find(|c| c.client_id == session.client_id)
-        .map(|c| {
-            c.redirect_uris
-                .iter()
-                .any(|pattern| redirect_matches(pattern, requested_redirect))
-        })
-        .unwrap_or(false);
-    if !redirect_ok {
-        return Json(json!({
-            "error": "invalid_grant",
-            "error_description": "OAuth重定向URI错误"
-        }))
-        .into_response();
-    }
-
-        let now = chrono::Utc::now().timestamp() as usize;
+    let now = chrono::Utc::now().timestamp() as usize;
 
         let keys = state.keys.read().unwrap();
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
@@ -2188,6 +2263,10 @@ fn create_sso_cookie(
         .http_only(true)
         .same_site(axum_extra::extract::cookie::SameSite::Lax);
 
+    if state.config.cookie_secure {
+        builder = builder.secure(true);
+    }
+
     if remember {
         // 勾选记住我: 持久化cookie，7天有效期
         builder = builder.max_age(time::Duration::days(7));
@@ -2195,6 +2274,15 @@ fn create_sso_cookie(
     // 未勾选记住我: 不设置max_age，让浏览器当作session cookie，关闭时自动删除
 
     builder.build()
+}
+
+/// 写入会话并维护内存上限（超过上限先清理过期项，防止被灌爆内存）
+fn insert_session(state: &Arc<AppState>, session_id: String, data: SessionData) {
+    let mut store = state.session_store.lock().unwrap();
+    if store.len() > SESSION_STORE_MAX {
+        store.retain(|_, s| s.created_at.elapsed().map(|d| d < SESSION_TTL).unwrap_or(true));
+    }
+    store.insert(session_id, data);
 }
 
 /// 生成登录后的HTTP响应
@@ -2227,11 +2315,16 @@ fn handle_login_response(
     if !is_direct_login {
         // 常规登录：生成授权码，并记录其关联的 redirect_uri、nonce 与创建时间
         let code = Uuid::new_v4().to_string();
-        state.code_store.lock().unwrap().insert(
+        let mut store = state.code_store.lock().unwrap();
+        if store.len() > CODE_STORE_MAX {
+            store.retain(|_, c| c.created_at.elapsed().map(|d| d < CODE_TTL).unwrap_or(true));
+        }
+        store.insert(
             code.clone(),
             AuthSession {
                 username,
                 client_id,
+                redirect_uri: redirect_uri.clone(),
                 nonce: nonce.clone(),
                 created_at: SystemTime::now(),
             },
@@ -2262,7 +2355,11 @@ fn init_app_state(config: Config) -> Arc<AppState> {
     let db_path = "users.db".to_string();
     db::init_db(&db_path).expect("Failed to init database");
 
-    let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path);
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path)
+    // rusqlite 连接默认开启外键；login_logs.uid 需容纳 `admin:<username>` 审计记录
+    // （管理员凭据在本地验证、不在 users 表），且删除级联已由 db::delete_user 手动处理，
+    // 故池连接关闭外键检查。
+    .with_init(|c| c.execute_batch("PRAGMA foreign_keys=OFF;"));
     let db_pool = r2d2::Pool::new(manager).expect("Failed to create database pool");
 
     let mut rng = rand::thread_rng();
@@ -2292,6 +2389,7 @@ fn init_app_state(config: Config) -> Arc<AppState> {
         db_pool,
         geoip_reader,
         geoip_cache: Mutex::new(HashMap::new()),
+        admin_lockout: Mutex::new(AdminLockout::default()),
     })
 }
 
