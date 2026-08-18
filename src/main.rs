@@ -2055,17 +2055,16 @@ async fn jwks_handler(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
-/// oidc端点解释,必须绑定到 /.well-known/openid-configuration
+/// OIDC discovery。挂载在根路径和 {prefix} 两个位置（issuer 已含 prefix）。
 async fn oidc_config_handler(State(state): State<Arc<AppState>>) -> Response {
-    let prefix = &state.config.auth_path_prefix;
     let issuer = &state.config.issuer;
 
     Json(json!({
         "issuer": issuer,
-        "authorization_endpoint": format!("{}{}/", issuer, prefix),
-        "token_endpoint": format!("{}{}/token", issuer, prefix),
-        "userinfo_endpoint": format!("{}{}/userinfo", issuer, prefix),
-        "jwks_uri": format!("{}{}/jwks", issuer, prefix),
+        "authorization_endpoint": format!("{}/authorize", issuer),
+        "token_endpoint": format!("{}/token", issuer),
+        "userinfo_endpoint": format!("{}/userinfo", issuer),
+        "jwks_uri": format!("{}/jwks", issuer),
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
         "grant_types_supported": ["authorization_code"],
@@ -2312,6 +2311,13 @@ async fn main() {
     if config.issuer.ends_with('/') {
         config.issuer.pop();
     }
+    // OIDC 规范：issuer 必须与所有端点所在的路径一致。配置了
+    // auth_path_prefix（如 /sso）时，issuer 也要带上该前缀，否则客户端
+    // （如 oneshare）按 discovery 的 issuer 校验会报 mismatch，或端点与
+    // issuer 路径不一致导致跳转到 /sso/sso。
+    if !config.auth_path_prefix.is_empty() {
+        config.issuer = format!("{}{}", config.issuer, config.auth_path_prefix);
+    }
     info!(issuer = %config.issuer, host = %config.host, port = config.port,
         "配置文件加载完成");
 
@@ -2417,11 +2423,25 @@ async fn main() {
             &format!("{prefix}/admin/api/users/:username/delete"),
             post(admin_delete_user_handler),
         )
-        // 固定路径不受 nest 影响
+        // 固定路径不受 nest 影响（根路径 discovery，向后兼容）
         .route(
             "/.well-known/openid-configuration",
             get(oidc_config_handler),
+        );
+
+    // OIDC discovery 必须挂在 issuer 路径下：issuer 已含 prefix（如 /sso）
+    // 时，{prefix}/.well-known/openid-configuration 也必须可达，否则客户端
+    // 按 issuer 拉取 discovery 会 404。prefix 为空时与根路由重复，跳过。
+    let app = if prefix.is_empty() {
+        app
+    } else {
+        app.route(
+            &format!("{prefix}/.well-known/openid-configuration"),
+            get(oidc_config_handler),
         )
+    };
+
+    let app = app
         .layer(GovernorLayer {
             config: governor_conf,
         })
