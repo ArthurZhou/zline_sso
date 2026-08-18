@@ -2061,7 +2061,12 @@ async fn oidc_config_handler(State(state): State<Arc<AppState>>) -> Response {
 
     Json(json!({
         "issuer": issuer,
-        "authorization_endpoint": format!("{}/authorize", issuer),
+        // 本项目没有独立的 /authorize 端点：OAuth 授权参数
+        // （client_id/redirect_uri/state/nonce）由登录页 {prefix}/ 的 JS
+        // 从 query string 读取，登录成功后回跳 redirect_uri?code=...。
+        // 因此 discovery 必须指向登录页本身，否则客户端（如 oneshare）
+        // 按 /authorize 跳转会 404。
+        "authorization_endpoint": format!("{issuer}/"),
         "token_endpoint": format!("{}/token", issuer),
         "userinfo_endpoint": format!("{}/userinfo", issuer),
         "jwks_uri": format!("{}/jwks", issuer),
