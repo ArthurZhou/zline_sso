@@ -545,8 +545,8 @@ pub fn list_users(
 /// 仅返回至少带有一个非基线角色/标签（即 `role` 非空且不等于基线 `user`）的用户，
 /// 且满足以下限制：
 /// - 用户必须带有 `manageable_tags` 中的至少一个标签（与当前 staff 共享标签）；
-/// - 排除本身带 `staff` 标签的用户（staff 不能对其他 staff 进行添加/移除操作，
-///   也不应看到其他 staff 的身份）。
+/// - 包含其他带 `staff` 标签的同组用户（前端可见但不可操作，
+///   且后端添加/移除接口均拒绝以 staff 用户为目标）。
 ///
 /// # 参数
 /// - `conn`: 数据库连接
@@ -574,7 +574,6 @@ pub fn list_tagged_users(
          state_description, restriction_end_time, last_login_time, failed_attempts \
          FROM users \
          WHERE (role IS NOT NULL AND role != '' AND role != 'user') \
-           AND (',' || role || ',') NOT LIKE '%,staff,%' \
            AND (",
     );
 

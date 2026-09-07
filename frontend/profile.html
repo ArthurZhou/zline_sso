@@ -666,12 +666,14 @@
                     ? roles.map(r => `<span class="tag-badge">${escapeHtml(r)}</span>`).join(' ')
                     : '<span style="color:var(--muted)">-</span>';
                 // 自己的行不提供任何操作（staff 不能修改自己的标签）
-                // 同组管理员（is_admin）可见但不可操作：不允许增删其标签
+                // 同组管理员（is_admin）与其他员工（is_staff）可见但不可操作：不允许增删其标签
                 let ops;
                 if (u.username === tagState.me) {
                     ops = '<span style="color:var(--muted)">（自己）</span>';
                 } else if (u.is_admin) {
                     ops = '<span style="color:var(--muted)">（管理员，不可修改）</span>';
+                } else if (u.is_staff) {
+                    ops = '<span style="color:var(--muted)">（同组员工，不可修改）</span>';
                 } else {
                     // 仅提供移除按钮：添加标签需通过上方表单填写用户名+姓名确认
                     ops = tagState.manageable

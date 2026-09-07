@@ -7,8 +7,8 @@
 //! - 仅普通（非管理员会话）登录且角色包含 `staff` 的用户可用；
 //! - 只能操作自己自带的标签；
 //! - 不能对自己操作；
-//! - 带有 `staff` 标签的用户完全不可见、不可操作；
-//! - 带有 `admin` 标签的用户（同组管理员）**可见但不可操作**（不能增删其标签）。
+//! - 同组其他带 `staff` 标签的用户**可见但不可操作**（不能增删其标签）；
+//! - 同组带 `admin` 标签的用户（同组管理员）**可见但不可操作**（不能增删其标签）。
 
 use axum::{
     Json,
@@ -164,7 +164,8 @@ pub async fn profile_tags_handler(State(state): State<Arc<AppState>>, jar: Cooki
 /// 员工标签管理：查询已加标签的用户列表（仅 staff 用户可用）。
 ///
 /// 返回与当前 staff 共享至少一个可管理标签的用户：
-/// - 排除本身带 `staff` 标签的用户；
+/// - **包含同组其他 staff 用户**（带 `staff` 标签且共享组标签的用户），
+///   其条目带 `is_staff: true` 标记，前端据此隐藏操作按钮；
 /// - **包含同组管理员**（带 `admin` 标签且共享组标签的用户），
 ///   其条目带 `is_admin: true` 标记，前端据此隐藏操作按钮；
 /// - 仅暴露该 staff 可管理的标签（与其自带标签求交集），避免泄露其无权查看的标签。
@@ -210,13 +211,15 @@ pub async fn profile_tag_users_handler(
                 .into_iter()
                 .filter(|r| manageable.iter().any(|m| m == r))
                 .collect();
-            // 同组管理员可见但不可操作
+            // 同组管理员/其他员工可见但不可操作
             let is_admin = has_role(&u.role, "admin");
+            let is_staff = has_role(&u.role, "staff");
             json!({
                 "username": u.username,
                 "full_name": u.full_name,
                 "role": visible_tags.join(","),
                 "is_admin": is_admin,
+                "is_staff": is_staff,
             })
         })
         .collect();
