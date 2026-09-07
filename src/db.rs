@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::{UserFlag, UserState};
+use crate::models::{UserFlag, UserState};
 pub type DbPool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 pub type DbConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
@@ -19,8 +19,10 @@ pub struct UserInfo {
     pub flag: i32,
     pub state: i32,
     pub state_description: Option<String>,
-    pub restriction_end_time: Option<String>,
-    pub last_login_time: Option<String>,
+    /// 限制结束时间（Unix 时间戳，秒；0/NULL 表示无固定结束时间）
+    pub restriction_end_time: Option<i64>,
+    /// 最后登录时间（Unix 时间戳，秒）
+    pub last_login_time: Option<i64>,
     pub failed_attempts: i32,
 }
 
@@ -30,7 +32,8 @@ pub struct LoginAttempt {
     pub ip_address: Option<String>,
     pub country: Option<String>,
     pub region: Option<String>,
-    pub timestamp: String,
+    /// 登录时间（Unix 时间戳，秒）
+    pub timestamp: i64,
 }
 
 /// 初始化数据库
@@ -67,12 +70,102 @@ pub fn init_db(path: &str) -> Result<(), rusqlite::Error> {
             flag INTEGER DEFAULT 0,
             state INTEGER DEFAULT 0,
             state_description TEXT,
-            restriction_end_time TEXT,
-            last_login_time TEXT,
+            restriction_end_time INTEGER,
+            last_login_time INTEGER,
             failed_attempts INTEGER DEFAULT 0
         );",
         [],
     )?;
+
+    // ============ 时间戳迁移（users 表） ============
+    // 自本版本起，所有时间均以 Unix 时间戳（秒，INTEGER）存储，前端根据浏览器时区本地化。
+    // 旧版本将 restriction_end_time / last_login_time 声明为 TEXT 列：TEXT 亲和性会把
+    // 整数强转为文本存储，导致无法按 i64 读取。这里检测旧列类型并重建表：
+    // 1. 先把旧文本时间（"YYYY-MM-DD HH:MM:SS" 或 RFC3339）转换为 Unix 时间戳；
+    // 2. 重建为 INTEGER 列并拷贝数据。
+    let users_needs_rebuild = {
+        let mut stmt = conn.prepare("PRAGMA table_info(users);")?;
+        let mut rows = stmt.query([])?;
+        let mut text_time_column = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            let col_type: String = row.get(2)?;
+            if (name == "last_login_time" || name == "restriction_end_time")
+                && col_type.eq_ignore_ascii_case("TEXT")
+            {
+                text_time_column = true;
+            }
+        }
+        text_time_column
+    };
+
+    if users_needs_rebuild {
+        // 迁移期间临时关闭外键：外键开启时 `DROP TABLE users` 会隐式删除其行，
+        // 进而通过 login_logs 的 ON DELETE CASCADE 级联清空登录日志。
+        let fk_was_on: bool = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i32>(0).map(|v| v != 0))
+            .unwrap_or(false);
+        if fk_was_on {
+            let _ = conn.pragma_update(None, "foreign_keys", "OFF");
+        }
+
+        // 1. 旧文本时间 -> Unix 时间戳（秒）。
+        //    GLOB 条件保证仅匹配旧文本格式，重复执行不会破坏已是纯数字的值。
+        let _ = conn.execute(
+            "UPDATE users SET last_login_time = CAST(strftime('%s', last_login_time) AS INTEGER) \
+             WHERE last_login_time IS NOT NULL \
+             AND last_login_time GLOB '[0-9][0-9][0-9][0-9]-*';",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE users SET restriction_end_time = CAST(strftime('%s', restriction_end_time) AS INTEGER) \
+             WHERE restriction_end_time IS NOT NULL \
+             AND restriction_end_time GLOB '[0-9][0-9][0-9][0-9]-*';",
+            [],
+        );
+
+        // 2. 重建表，将时间列改为 INTEGER
+        conn.execute(
+            "CREATE TABLE users_new (
+                uid TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                external_uid TEXT,
+                full_name TEXT,
+                student_id TEXT,
+                gender TEXT,
+                role TEXT DEFAULT 'user',
+                flag INTEGER DEFAULT 0,
+                state INTEGER DEFAULT 0,
+                state_description TEXT,
+                restriction_end_time INTEGER,
+                last_login_time INTEGER,
+                failed_attempts INTEGER DEFAULT 0
+            );",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO users_new \
+                (uid, username, external_uid, full_name, student_id, gender, role, flag, state, \
+                 state_description, restriction_end_time, last_login_time, failed_attempts) \
+             SELECT uid, username, external_uid, full_name, student_id, gender, role, flag, state, \
+                 state_description, \
+                 CASE WHEN restriction_end_time IS NULL OR restriction_end_time = '' \
+                      THEN NULL ELSE CAST(restriction_end_time AS INTEGER) END, \
+                 CASE WHEN last_login_time IS NULL OR last_login_time = '' \
+                      THEN NULL ELSE CAST(last_login_time AS INTEGER) END, \
+                 failed_attempts \
+             FROM users;",
+            [],
+        )?;
+        conn.execute("DROP TABLE users;", [])?;
+        conn.execute("ALTER TABLE users_new RENAME TO users;", [])?;
+
+        // 恢复外键设置
+        if fk_was_on {
+            let _ = conn.pragma_update(None, "foreign_keys", "ON");
+        }
+    }
+
     // 创建索引以加快查询
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_username ON users(uid);", []);
 
@@ -115,6 +208,16 @@ pub fn init_db(path: &str) -> Result<(), rusqlite::Error> {
     // 创建索引以加快查询
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_login_logs_username ON login_logs(uid);",
+        [],
+    );
+
+    // ============ 时间戳迁移（login_logs 表） ============
+    // login_logs.timestamp 为 DATETIME（NUMERIC 亲和性），整数可原样存储；
+    // 仅需把旧版本的 UTC 文本一次性转换为 Unix 时间戳（秒）。
+    // GLOB 条件保证仅匹配旧文本格式，重复执行不会破坏已是整数的时间戳。
+    let _ = conn.execute(
+        "UPDATE login_logs SET timestamp = CAST(strftime('%s', timestamp) AS INTEGER) \
+         WHERE typeof(timestamp) = 'text' AND timestamp GLOB '[0-9][0-9][0-9][0-9]-*';",
         [],
     );
 
@@ -218,7 +321,8 @@ pub fn record_login_success(
     region: &str,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "UPDATE users SET last_login_time=CURRENT_TIMESTAMP, failed_attempts=0 WHERE uid=?1",
+        // 时间统一以 Unix 时间戳（秒）存储
+        "UPDATE users SET last_login_time=CAST(strftime('%s','now') AS INTEGER), failed_attempts=0 WHERE uid=?1",
         [uid],
     )?;
     // 记录到审计日志
@@ -260,10 +364,10 @@ pub fn record_login_failure(
 ///
 /// # 参数
 /// - `conn`: 数据库连接
-/// - `username`: 用户名
+/// - `uid`: 用户uuid
 /// - `state`: 新状态码
 /// - `description`: 状态描述
-/// - `end_time`: 限制结束时间（ISO8601格式，如 "2024-12-31T23:59:59"）
+/// - `end_time`: 限制结束时间（Unix 时间戳，秒；0 表示无固定结束时间）
 ///
 /// # 返回值
 /// - `Ok(())`: 操作成功
@@ -273,11 +377,12 @@ pub fn set_user_state(
     uid: &str,
     state: UserState,
     description: &str,
-    end_time: &str,
+    end_time: i64,
 ) -> Result<(), rusqlite::Error> {
+    let end_time_param: Option<i64> = if end_time > 0 { Some(end_time) } else { None };
     conn.execute(
         "UPDATE users SET state=?1, state_description=?2, restriction_end_time=?3 WHERE uid=?4",
-        rusqlite::params![state as i32, description, end_time.to_string(), uid],
+        rusqlite::params![state as i32, description, end_time_param, uid],
     )?;
     Ok(())
 }
@@ -324,7 +429,9 @@ fn log_login_attempt(
     success: i32,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO login_logs (uid, ip_address, country, region, success) VALUES (?1, ?2, ?3, ?4, ?5)",
+        // 时间统一以 Unix 时间戳（秒）存储
+        "INSERT INTO login_logs (uid, ip_address, country, region, success, timestamp) \
+         VALUES (?1, ?2, ?3, ?4, ?5, CAST(strftime('%s','now') AS INTEGER))",
         rusqlite::params![uid, ip_address, country, region, success],
     )?;
     Ok(())
@@ -378,7 +485,8 @@ pub struct AllLoginLog {
     pub ip_address: Option<String>,
     pub country: Option<String>,
     pub region: Option<String>,
-    pub timestamp: String,
+    /// 登录时间（Unix 时间戳，秒）
+    pub timestamp: i64,
 }
 
 /// 查询用户列表（管理员使用）。

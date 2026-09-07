@@ -451,12 +451,12 @@
                 <h3 class="tag-subtitle">添加标签</h3>
                 <div class="tag-toolbar">
                     <input type="text" id="tagAddUsername" class="tag-input" placeholder="目标用户名">
-                    <input type="text" id="tagAddFullname" class="tag-input" placeholder="目标姓名（需与系统记录一致）">
+                    <input type="text" id="tagAddFullname" class="tag-input" placeholder="目标姓名">
                     <select id="tagAddTag" class="tag-input" style="flex:0 0 auto;min-width:120px;"></select>
                     <button class="btn btn-tag" id="tagAddBtn">添加</button>
                 </div>
                 <p class="sync-note">
-                    填写目标用户的“用户名 + 姓名”并提交，服务端核对无误后才会添加所选标签，避免加错人。
+                    填写目标用户的“用户名 + 姓名”并提交。
                 </p>
 
                 <!-- 已加标签的用户 -->
@@ -525,10 +525,19 @@
         }
 
         function formatLocalTime(timeString) {
-            if (!timeString) return null;
-            // 解析 "2026-05-09 04:53:26" 格式，假设是 UTC 时间
-            const date = new Date(timeString + ' UTC');
-            if (isNaN(date.getTime())) return timeString; // 如果解析失败，返回原字符串
+            if (timeString === null || timeString === undefined || timeString === '' || timeString === 0) return null;
+            let date;
+            if (typeof timeString === 'number') {
+                // 新版：Unix 时间戳（秒），由浏览器本地化显示
+                date = new Date(timeString * 1000);
+            } else if (String(timeString).includes('T')) {
+                // 兼容：RFC3339 字符串
+                date = new Date(timeString);
+            } else {
+                // 兼容：旧版 "2026-05-09 04:53:26" 格式，假设是 UTC 时间
+                date = new Date(timeString + ' UTC');
+            }
+            if (isNaN(date.getTime())) return String(timeString); // 如果解析失败，返回原字符串
             return date.toLocaleString();
         }
 
@@ -539,14 +548,22 @@
             document.getElementById('val-student-id').textContent = data.student_id || '-';
             document.getElementById('val-gender').textContent = data.gender || '-';
             document.getElementById('val-extid').textContent = data.external_uid || '-';
-            document.getElementById('val-role').textContent = data.role;
+            // 角色：与标签管理一致的徽章样式
+            const roleEl = document.getElementById('val-role');
+            const roles = String(data.role || '').split(',').map(s => s.trim()).filter(Boolean);
+            roleEl.innerHTML = roles.length
+                ? roles.map(r => `<span class="tag-badge">${escapeHtml(r)}</span>`).join(' ')
+                : '<span style="color:var(--muted)">-</span>';
             document.getElementById('val-last-login').textContent = formatLocalTime(data.last_login_time) || '-';
 
             // 状态标签逻辑
             const statusEl = document.getElementById('val-status');
-            if (data.state === 1 || data.state === 2) {
+            if (data.state === 1) {
+                statusEl.className = 'status-badge warn';
+                statusEl.textContent = '受限';
+            } else if (data.state === 2) {
                 statusEl.className = 'status-badge locked';
-                statusEl.textContent = '已禁用';
+                statusEl.textContent = '已锁定';
             } else if (data.state === 3) {
                 statusEl.className = 'status-badge warn';
                 statusEl.textContent = '跳过验证';
@@ -641,9 +658,12 @@
                     ? roles.map(r => `<span class="tag-badge">${escapeHtml(r)}</span>`).join(' ')
                     : '<span style="color:var(--muted)">-</span>';
                 // 自己的行不提供任何操作（staff 不能修改自己的标签）
+                // 同组管理员（is_admin）可见但不可操作：不允许增删其标签
                 let ops;
                 if (u.username === tagState.me) {
                     ops = '<span style="color:var(--muted)">（自己）</span>';
+                } else if (u.is_admin) {
+                    ops = '<span style="color:var(--muted)">（管理员，不可修改）</span>';
                 } else {
                     // 仅提供移除按钮：添加标签需通过上方表单填写用户名+姓名确认
                     ops = tagState.manageable

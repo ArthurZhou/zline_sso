@@ -51,6 +51,9 @@ password_hash = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a91
 [[clients]]
 client_id = "test_client"
 client_secret = "test_client_secret"
+# friendly_name：客户端显示名称，展示在登录页/继续页的“正在登录到”区域。
+# 缺省时回退显示 client_id。
+friendly_name = "测试应用"
 redirect_uris = [
     "http://127.0.0.1:8080/callback",
     "^http://localhost:\\d+/callback$",

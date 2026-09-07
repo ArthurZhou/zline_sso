@@ -79,6 +79,39 @@
             text-align: center;
         }
 
+        /* 正在登录到的服务信息 */
+        .client-box {
+            background: var(--accent-bg);
+            padding: 16px 20px;
+            margin-bottom: 20px;
+            text-align: center;
+            border-left: 4px solid var(--text);
+        }
+
+        .client-box .ci-name {
+            font-size: 16px;
+            font-weight: 900;
+            word-break: break-all;
+        }
+
+        .client-box .ci-fields {
+            display: block;
+            margin-top: 8px;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        /* 客户端配置错误（页面加载阶段即展示） */
+        .client-fatal {
+            background: var(--accent-bg);
+            color: var(--error);
+            font-weight: bold;
+            font-size: 13px;
+            padding: 15px;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+
         .label {
             display: block;
             font-size: 11px;
@@ -146,12 +179,22 @@
             <h1>欢迎回来</h1>
         </div>
 
+        <!-- 正在登录到的服务及其将获得的信息 -->
+        <div id="clientBox" class="client-box hidden">
+            <span class="label">正在登录到</span>
+            <span class="ci-name" id="ciName"></span>
+            <span class="ci-fields" id="ciFields"></span>
+        </div>
+
+        <!-- 客户端配置错误：页面加载阶段即展示，禁止继续 -->
+        <div id="clientFatal" class="client-fatal hidden"></div>
+
         <div class="user-box">
             <span class="label">已登录账户</span>
             <span class="username">{{username}}</span>
         </div>
 
-        <div class="btn-group">
+        <div class="btn-group" id="btnGroup">
             <button class="btn btn-primary" onclick="handleContinue()">使用此账户继续</button>
             <button class="btn btn-secondary" onclick="handleLogout()">退出并切换</button>
         </div>
@@ -174,12 +217,65 @@
         const AUTH_PATH = detectAuthPath();
         const queryParams = window.location.search;
 
+        // ===== 客户端信息展示与预校验 =====
+        // return_extra_userinfo 字段的中文名称
+        const FIELD_LABELS = {
+            external_uid: '外部ID',
+            full_name: '姓名',
+            student_id: '学号',
+            gender: '性别',
+            role: '角色',
+        };
+
+        // 客户端配置非法：立即展示错误并禁用继续，无需等到点击继续
+        function showClientFatal(text) {
+            const fatalEl = document.getElementById('clientFatal');
+            fatalEl.textContent = text;
+            fatalEl.classList.remove('hidden');
+            document.getElementById('clientBox').classList.add('hidden');
+            document.getElementById('btnGroup').style.display = 'none';
+        }
+
+        // 页面加载时获取“正在登录到”的服务信息，同时预校验 client 配置合法性
+        async function loadClientInfo() {
+            const params = new URLSearchParams(queryParams);
+            const clientId = params.get('client_id') || '';
+            if (!clientId) return; // 个人中心直接登录，不展示
+
+            try {
+                const r = await fetch(`${AUTH_PATH}/client-info${queryParams}`);
+                const d = await r.json();
+                if (!r.ok || d.error) {
+                    showClientFatal(d.error || 'OAuth客户端配置错误，无法继续');
+                    return;
+                }
+                document.getElementById('ciName').textContent = d.friendly_name || clientId;
+                const fields = (d.userinfo_fields || []).map(f => FIELD_LABELS[f] || f);
+                document.getElementById('ciFields').textContent =
+                    fields.length ? `继续后该服务将获得：${fields.join('、')}` : '';
+                document.getElementById('clientBox').classList.remove('hidden');
+            } catch (e) {
+                showClientFatal('无法连接认证服务，请稍后重试');
+            }
+        }
+        loadClientInfo();
+
         async function handleContinue() {
             try {
                 const resp = await fetch(`${AUTH_PATH}/continue${queryParams}`);
                 if (resp.ok) {
                     const data = await resp.json();
-                    
+                    if (!data.code || !data.redirect_uri) {
+                        alert("Network failure.");
+                        return;
+                    }
+
+                    // 个人中心登录：直接跳转
+                    if (data.code === 'profile') {
+                        window.location.href = data.redirect_uri;
+                        return;
+                    }
+
                     // --- 关键修复：智能处理 URL 拼接 ---
                     const redirectBase = data.redirect_uri;
                     // 判断原 URI 是否已包含问号
@@ -197,8 +293,8 @@
                     // ------------------------------
                     
                 } else {
-                    const errorText = await resp.text();
-                    alert("Auth Error: " + errorText);
+                    // 无论何种错误，始终只显示网络失败，不泄露服务端错误详情
+                    alert("Network failure.");
                 }
             } catch (e) {
                 alert("Network failure.");

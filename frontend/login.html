@@ -148,6 +148,41 @@
             min-height: 1.2em;
         }
 
+        /* 正在登录到的服务信息 */
+        .client-info {
+            background: var(--input-bg);
+            padding: 14px 16px;
+            margin-bottom: 20px;
+            font-size: 12px;
+            line-height: 1.8;
+            border-left: 4px solid var(--accent);
+        }
+
+        .client-info .ci-name {
+            font-weight: 900;
+            font-size: 15px;
+            word-break: break-all;
+        }
+
+        .client-info .ci-fields {
+            color: var(--muted);
+        }
+
+        /* 客户端配置错误（页面加载阶段即展示） */
+        .client-fatal {
+            background: var(--input-bg);
+            color: var(--error);
+            font-weight: bold;
+            font-size: 13px;
+            padding: 15px;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+
+        .hidden {
+            display: none;
+        }
+
         .footer {
             margin-top: 40px;
             font-size: 11px;
@@ -175,6 +210,16 @@
         <div class="header">
             <h1>SSO 登录</h1>
         </div>
+
+        <!-- 正在登录到的服务及其将获得的信息 -->
+        <div id="clientInfo" class="client-info hidden">
+            <div>正在登录到</div>
+            <div class="ci-name" id="ciName"></div>
+            <div class="ci-fields" id="ciFields"></div>
+        </div>
+
+        <!-- 客户端配置错误：页面加载阶段即展示，禁止登录 -->
+        <div id="clientFatal" class="client-fatal hidden"></div>
 
         <form id="loginForm">
             <div class="form-item">
@@ -238,6 +283,52 @@
         const loginForm = document.getElementById('loginForm');
         const submitBtn = document.getElementById('submitBtn');
         const msg = document.getElementById('msg');
+
+        // ===== 客户端信息展示与预校验 =====
+        // return_extra_userinfo 字段的中文名称
+        const FIELD_LABELS = {
+            external_uid: '外部ID',
+            full_name: '姓名',
+            student_id: '学号',
+            gender: '性别',
+            role: '角色',
+        };
+
+        // 客户端配置非法：立即展示错误并禁用登录，无需等到点击登录
+        function showClientFatal(text) {
+            const fatalEl = document.getElementById('clientFatal');
+            fatalEl.textContent = text;
+            fatalEl.classList.remove('hidden');
+            document.getElementById('clientInfo').classList.add('hidden');
+            loginForm.style.display = 'none';
+        }
+
+        // 页面加载时获取“正在登录到”的服务信息，同时预校验 client 配置合法性
+        async function loadClientInfo() {
+            const params = new URLSearchParams(window.location.search);
+            const clientId = params.get('client_id') || '';
+            if (!clientId) return; // 个人中心直接登录，不展示
+
+            try {
+                const q = new URLSearchParams({ client_id: clientId });
+                const ru = params.get('redirect_uri');
+                if (ru) q.set('redirect_uri', ru);
+                const r = await fetch(`${AUTH_PATH}/client-info?${q}`);
+                const d = await r.json();
+                if (!r.ok || d.error) {
+                    showClientFatal(d.error || 'OAuth客户端配置错误，无法登录');
+                    return;
+                }
+                document.getElementById('ciName').textContent = d.friendly_name || clientId;
+                const fields = (d.userinfo_fields || []).map(f => FIELD_LABELS[f] || f);
+                document.getElementById('ciFields').textContent =
+                    fields.length ? `登录后该服务将获得：${fields.join('、')}` : '';
+                document.getElementById('clientInfo').classList.remove('hidden');
+            } catch (e) {
+                showClientFatal('无法连接认证服务，请稍后重试');
+            }
+        }
+        loadClientInfo();
 
         async function webCryptoEncrypt(text, keyHex) {
             const encoder = new TextEncoder();

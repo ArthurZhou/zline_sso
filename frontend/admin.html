@@ -385,9 +385,15 @@
         }
 
         function formatLocalTime(t) {
-            if (!t) return '-';
-            const d = new Date(t + (t.includes('T') ? '' : ' UTC'));
-            if (isNaN(d.getTime())) return t;
+            if (t === null || t === undefined || t === '' || t === 0) return '-';
+            let d;
+            if (typeof t === 'number') {
+                // 新版：Unix 时间戳（秒），由浏览器本地化显示
+                d = new Date(t * 1000);
+            } else {
+                d = new Date(t + (t.includes('T') ? '' : ' UTC'));
+            }
+            if (isNaN(d.getTime())) return String(t);
             return d.toLocaleString();
         }
 
@@ -398,8 +404,12 @@
         }
 
         function stateBadge(state, desc) {
-            if (state === 1 || state === 2) {
-                return '<span class="badge badge-err">已禁用</span>' +
+            if (state === 1) {
+                return '<span class="badge badge-warn">受限</span>' +
+                    (desc ? '<span style="color:var(--muted);font-size:11px;"> ' + esc(desc) + '</span>' : '');
+            }
+            if (state === 2) {
+                return '<span class="badge badge-err">已锁定</span>' +
                     (desc ? '<span style="color:var(--muted);font-size:11px;"> ' + esc(desc) + '</span>' : '');
             }
             if (state === 3) return '<span class="badge badge-warn">跳过验证</span>';
@@ -458,9 +468,14 @@
                 </tr></thead><tbody>`;
             for (const u of list) {
                 const roleSel = `<input type="text" class="role-input" data-uid="${esc(u.uid)}" data-username="${esc(u.username)}" data-role="${esc(u.role)}" value="${esc(u.role)}" title="支持逗号分隔多个角色，仅允许字母/数字/-/_">`;
-                const banBtn = (u.state === 1 || u.state === 2)
-                    ? `<button class="btn btn-sm" data-act="unban" data-username="${esc(u.username)}" style="background:var(--success);color:#000;">解封</button>`
-                    : `<button class="btn btn-sm" data-act="ban" data-username="${esc(u.username)}" style="background:var(--error);">封禁</button>`;
+                // 账户状态下拉框：正常 / 受限 / 锁定 / 跳过验证
+                const stateSel = `<select data-statesel="${esc(u.username)}" title="设置账户状态">
+                    <option value="0"${u.state === 0 ? ' selected' : ''}>正常</option>
+                    <option value="1"${u.state === 1 ? ' selected' : ''}>受限</option>
+                    <option value="2"${u.state === 2 ? ' selected' : ''}>锁定</option>
+                    <option value="3"${u.state === 3 ? ' selected' : ''}>跳过验证</option>
+                </select>`;
+                const applyBtn = `<button class="btn btn-sm" data-act="setstate" data-username="${esc(u.username)}">应用</button>`;
                 const delBtn = `<button class="btn btn-sm" data-act="del" data-username="${esc(u.username)}" style="background:var(--warn);color:#000;">删除</button>`;
                 html += `<tr>
                     <td><strong>${esc(u.username)}</strong></td>
@@ -470,7 +485,7 @@
                     <td>${stateBadge(u.state, u.state_description)}</td>
                     <td>${formatLocalTime(u.last_login_time)}</td>
                     <td>${u.failed_attempts}</td>
-                    <td class="actions">${banBtn}${delBtn}</td>
+                    <td class="actions">${stateSel}${applyBtn}${delBtn}</td>
                 </tr>`;
             }
             html += '</tbody></table>';
@@ -515,6 +530,35 @@
         }
 
         // ---- 动作 ----
+        // 设置账户状态：0=正常, 1=受限, 2=锁定, 3=跳过验证
+        async function doSetState(btn) {
+            const username = btn.dataset.username;
+            const row = btn.closest('tr');
+            const sel = row.querySelector('select[data-statesel]');
+            if (!sel) return;
+            const state = parseInt(sel.value, 10);
+            let reason = '';
+            let duration_hours = null;
+            // 受限/锁定时询问原因与时长
+            if (state === 1 || state === 2) {
+                reason = window.prompt(`设置 ${username} 状态说明（可选）：`, '') || '';
+                if (reason === null) return;
+                const durInput = window.prompt('限制时长（小时），留空或 0 = 直到手动解除：', '');
+                if (durInput === null) return;
+                if (durInput.trim() !== '') {
+                    const n = parseInt(durInput, 10);
+                    if (!isNaN(n) && n > 0) duration_hours = n;
+                }
+            }
+            const r = await fetch(`${AUTH_PATH}/admin/api/users/${encodeURIComponent(username)}/state`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ state, reason: reason || undefined, duration_hours }),
+            });
+            const d = await r.json();
+            if (d.error) showMsg(d.error, true); else { showMsg(d.message || '状态已更新'); loadUsers(users.offset); }
+        }
+
         async function doBan(username) {
             const reason = window.prompt(`封禁用户 ${username}，请输入原因（可选）：`, '');
             if (reason === null) return; // 取消
@@ -582,7 +626,8 @@
             if (btn) {
                 const act = btn.dataset.act;
                 const username = btn.dataset.username;
-                if (act === 'ban') await doBan(username);
+                if (act === 'setstate') await doSetState(btn);
+                else if (act === 'ban') await doBan(username);
                 else if (act === 'unban') await doUnban(username);
                 else if (act === 'del') await doDeleteUser(username);
                 return;
